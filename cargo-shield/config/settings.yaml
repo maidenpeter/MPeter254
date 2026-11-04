@@ -1,0 +1,57 @@
+# CargoShield demo settings.
+# Everything here is demo configuration. Nothing in this file is a real rate,
+# a real airline code or a real customer.
+
+airline:
+  name: Demo Airline
+  # 3-digit airline prefix for air waybills. 999 is a placeholder.
+  # Swap in the real prefix only once the airline has given permission.
+  awb_prefix: "999"
+
+paths:
+  # Generated files (database, model, fake documents) go here.
+  # Override with the CARGOSHIELD_DATA_DIR environment variable.
+  data_dir: data
+  routes_csv: data/routes.csv
+
+seed:
+  random_seed: 254
+  bookings: 3000
+  shippers: 400
+  # Share of bookings that carry a planted risk pattern (spec: 3 to 5%).
+  planted_fraction: 0.04
+  # Bookings are spread over this many days before the moment you seed,
+  # so the dashboard always looks current.
+  history_days: 45
+  # Share of eligible past bookings that already bought cover, and how many
+  # past verification checks to pre-load, so the dashboard isn't empty.
+  history_policy_share: 0.10
+  history_verifications: 140
+
+server:
+  host: 127.0.0.1
+  port: 8000
+  # Base URL printed inside policy QR codes. "auto" uses the address the
+  # dashboard was opened on. Open the dashboard on your laptop's LAN address
+  # (see DEMO.md) if you want a phone to scan the QR.
+  public_base_url: auto
+
+cover:
+  # Carrier liability under the Montreal Convention 1999, Article 22(3).
+  # 26 SDR per kg since 28 December 2024 (was 22).
+  # Verify the current Montreal Convention limit before any real use.
+  carrier_liability_sdr_per_kg: 26
+  # Illustrative SDR to USD rate. Check the IMF daily rate before any real use.
+  sdr_to_usd: 1.36
+  # Loadings are shares of the gross premium:
+  #   gross = expected_loss / (1 - expense_loading - profit_margin)
+  expense_loading: 0.25
+  profit_margin: 0.10
+  minimum_premium_usd: 25.0
+  # Multiplier applied to the base loss rate, by risk band.
+  # HIGH is never offered cover; it goes to manual review.
+  risk_multiplier:
+    LOW: 1.0
+    MEDIUM: 1.75
+  currency: USD
+  disclaimer: "Illustrative prices for a demo. Not real rates and not an offer of insurance."

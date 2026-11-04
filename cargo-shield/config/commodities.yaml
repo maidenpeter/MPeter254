@@ -1,0 +1,134 @@
+# Commodity classes used by the generator, the risk engine and the pricing model.
+# All numbers are illustrative demo assumptions, not market data.
+#
+# keywords        words that map a free-text description to this class (checked in file order)
+# descriptions    what the generator writes on synthetic bookings
+# density_kg_m3   plausible range for this class (weight / volume)
+# value_per_kg    plausible declared value range in USD per kg
+# weight_kg       plausible chargeable weight range for one booking
+# base_loss_rate  expected loss as a share of sum insured, before the risk multiplier
+
+classes:
+  valuables:
+    label: Valuables
+    keywords: [gold, precious metal, bank note, banknote, cash, gemstone, jewel, bullion, dore]
+    descriptions: [Gold bars, Gold dore, Precious metals, Bank notes, Gemstones]
+    density_kg_m3: [1200, 6500]
+    typical_density: 3000
+    value_per_kg: [30000, 115000]
+    weight_kg: [1, 40]
+    piece_kg: 5
+    high_value: true
+    base_loss_rate: 0.008
+
+  mobile_phones:
+    label: Mobile phones
+    keywords: [phone, handset, smartphone]
+    descriptions: [Mobile phones, Smartphones, Mobile handsets]
+    density_kg_m3: [150, 380]
+    typical_density: 240
+    value_per_kg: [250, 1400]
+    weight_kg: [20, 700]
+    piece_kg: 14
+    high_value: true
+    base_loss_rate: 0.007
+
+  pharma:
+    label: Pharmaceuticals
+    keywords: [pharma, vaccine, medic, drug, antiretroviral]
+    descriptions: [Pharmaceuticals, Vaccines (temperature controlled), Medical consumables, Antiretroviral medicines]
+    density_kg_m3: [110, 320]
+    typical_density: 190
+    value_per_kg: [40, 600]
+    weight_kg: [30, 1600]
+    piece_kg: 20
+    high_value: false
+    base_loss_rate: 0.004
+
+  documents:
+    label: Documents
+    keywords: [document, papers]
+    descriptions: [Documents, Business documents, Courier documents, Tender documents]
+    density_kg_m3: [180, 480]
+    typical_density: 300
+    value_per_kg: [2, 60]
+    weight_kg: [0.5, 25]
+    piece_kg: 3
+    high_value: false
+    base_loss_rate: 0.001
+
+  perishables:
+    label: Perishables
+    keywords: [fresh, chilled, frozen, flower, fish, meat, lamb, fruit, avocado, mango, vegetable, beans, herbs]
+    descriptions: [Fresh cut flowers, Fresh avocados, Chilled fish fillets, Fresh green beans, Fresh mangoes, Chilled lamb carcasses, Fresh herbs]
+    density_kg_m3: [130, 450]
+    typical_density: 240
+    value_per_kg: [3, 14]
+    weight_kg: [80, 2400]
+    piece_kg: 15
+    high_value: false
+    base_loss_rate: 0.009
+
+  garments:
+    label: Garments
+    keywords: [garment, shirt, jean, uniform, sweater, apparel, textile, clothing]
+    descriptions: [Cotton T-shirts, Ladies garments, Denim jeans, School uniforms, Knitted sweaters]
+    density_kg_m3: [90, 260]
+    typical_density: 160
+    value_per_kg: [8, 45]
+    weight_kg: [40, 2000]
+    piece_kg: 20
+    high_value: false
+    base_loss_rate: 0.003
+
+  electronics:
+    label: Electronics
+    keywords: [laptop, computer, television, electronic, inverter, network, tablet]
+    descriptions: [Laptop computers, LED televisions, Computer components, Network equipment, Solar inverters]
+    density_kg_m3: [120, 350]
+    typical_density: 200
+    value_per_kg: [30, 260]
+    weight_kg: [40, 1800]
+    piece_kg: 18
+    high_value: false
+    base_loss_rate: 0.0045
+
+  machinery_parts:
+    label: Machinery parts
+    keywords: [machinery, spare part, pump, engine, mining, parts]
+    descriptions: [Machinery spare parts, Pump assemblies, Engine components, Mining equipment parts, Agricultural machinery parts]
+    density_kg_m3: [300, 1100]
+    typical_density: 520
+    value_per_kg: [12, 90]
+    weight_kg: [50, 3500]
+    piece_kg: 45
+    high_value: false
+    base_loss_rate: 0.0025
+
+  general_cargo:
+    label: General cargo
+    keywords: []
+    descriptions: [Household appliances, Printed books, Plastic housewares, Stationery supplies, Cosmetics and toiletries, Kitchenware]
+    density_kg_m3: [120, 420]
+    typical_density: 210
+    value_per_kg: [4, 40]
+    weight_kg: [30, 2500]
+    piece_kg: 20
+    high_value: false
+    base_loss_rate: 0.003
+
+# Free-text descriptions that say almost nothing about what is in the box.
+# They map to general_cargo and switch on the "vague description" feature.
+vague:
+  class: general_cargo
+  phrases: [general goods, personal effects, assorted items, consolidated goods, various goods, samples, miscellaneous goods, misc goods]
+  descriptions: [General goods, Personal effects, Assorted items, Consolidated goods, Various goods, Samples, Miscellaneous goods]
+
+# How each payment method reads after the word "paid" in a risk reason.
+payment_methods:
+  credit_account: on credit account
+  bank_transfer: by bank transfer
+  card: by card
+  mobile_money: by mobile money
+  cash: in cash
+  third_party: by a third party

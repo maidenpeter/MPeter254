@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+# generated at seed time
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.joblib
+data/samples/
+# screenshots and scratch output
+output/

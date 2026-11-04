@@ -1,0 +1,133 @@
+# CargoShield risk rules.
+#
+# Tune weights, thresholds and wording here. No code changes needed.
+#
+# Each rule:
+#   id      stable name, used in tests and stored with every score
+#   weight  points added to the score when the rule fires
+#   when    conditions over the booking's features (see cargoshield/features.py)
+#             {field, op, value}   op is one of: lt, lte, gt, gte, eq, ne, in, not_in
+#             combine with  all: [...]  or  any: [...]  (they nest)
+#   reason  the plain-English sentence shown to staff. {field} placeholders are filled
+#           from the same features and accept Python format specs, e.g. {weight_kg:,.0f}
+#
+# Score = sum of rule points + anomaly points, capped at 100.
+# The anomaly model is a supporting signal only: a booking with no rule hit can never
+# score above max_score_without_rule_hit, so it is never flagged by the model alone.
+
+bands:
+  LOW: [0, 39]
+  MEDIUM: [40, 69]
+  HIGH: [70, 100]
+
+anomaly:
+  max_points: 20
+  # Only bookings more unusual than this share of past bookings earn points.
+  trigger_percentile: 0.90
+  min_points_to_report: 3
+  max_score_without_rule_hit: 39
+
+# Rules that depend on the fraud graph. They run in a second pass, after the
+# engine knows which shippers are flagged.
+graph_rules: [linked_to_flagged_shipper]
+
+rules:
+  # ---- Strong signals: any one of these puts a booking in MEDIUM or higher ----
+  - id: new_shipper_high_value
+    weight: 45
+    when:
+      all:
+        - {field: shipper_age_days, op: lt, value: 30}
+        - {field: is_high_value_commodity, op: eq, value: true}
+    reason: "New shipper ({shipper_age_text} old) booking high-value goods: {commodity_text}."
+
+  - id: vague_description_dense
+    weight: 40
+    when:
+      all:
+        - {field: is_vague_description, op: eq, value: true}
+        - {field: density_kg_m3, op: gt, value: 600}
+    reason: "Vague description (\"{commodity_text}\") on a shipment packed at {density_kg_m3:,.0f} kg per m³, far denser than normal general cargo."
+
+  - id: vague_description_high_value
+    weight: 40
+    when:
+      all:
+        - {field: is_vague_description, op: eq, value: true}
+        - {field: declared_value_usd, op: gte, value: 20000}
+    reason: "Vague description (\"{commodity_text}\") with a declared value of ${declared_value_usd:,.0f}."
+
+  - id: weight_volume_mismatch
+    weight: 40
+    when:
+      any:
+        - {field: density_ratio, op: gt, value: 3.0}
+        - {field: density_ratio, op: lt, value: 0.3}
+    reason: "Weight and volume don't fit the goods: {weight_kg:,.0f} kg in {volume_m3:.3g} m³ is {density_kg_m3:,.0f} kg per m³. {commodity_class_label} usually run near {class_typical_density:,.0f}."
+
+  - id: implausible_weight
+    weight: 40
+    when:
+      all:
+        - {field: weight_ratio_to_class_max, op: gt, value: 2.0}
+    reason: "Declared as {commodity_text_lower} but weighs {weight_kg:,.0f} kg. Shipments like this rarely exceed {class_max_weight_kg:,.0f} kg."
+
+  - id: late_booking_risky_payment
+    weight: 40
+    when:
+      all:
+        - {field: lead_time_hours, op: lt, value: 12}
+        - {field: payment_method, op: in, value: [cash, third_party]}
+    reason: "Booked {lead_time_hours:.0f} hours before departure and paid {payment_phrase}."
+
+  - id: linked_to_flagged_shipper
+    weight: 45
+    when:
+      all:
+        - {field: linked_flagged_count, op: gte, value: 1}
+    reason: "Shares {linked_via} with {linked_flagged_text}."
+
+  - id: watchlist_shipper
+    weight: 35
+    when:
+      all:
+        - {field: kyc_status, op: eq, value: failed}
+    reason: "Shipper failed KYC checks and sits on the internal watchlist."
+
+  # ---- Supporting signals: they add weight but rarely flag a booking alone ----
+  - id: value_density_outlier
+    weight: 20
+    when:
+      all:
+        - {field: value_per_kg_ratio, op: gt, value: 5.0}
+    reason: "Declared value per kg (${value_per_kg:,.0f}) is {value_per_kg_ratio:.0f} times normal for {commodity_class_label_lower}."
+
+  - id: new_shipper
+    weight: 12
+    when:
+      all:
+        - {field: shipper_age_days, op: lt, value: 30}
+        - {field: is_high_value_commodity, op: eq, value: false}
+    reason: "New shipper account ({shipper_age_text} old)."
+
+  - id: kyc_pending
+    weight: 8
+    when:
+      all:
+        - {field: kyc_status, op: eq, value: pending}
+    reason: "Shipper KYC checks are not complete yet."
+
+  - id: very_late_booking
+    weight: 8
+    when:
+      all:
+        - {field: lead_time_hours, op: lt, value: 6}
+    reason: "Booked only {lead_time_hours:.0f} hours before departure."
+
+  - id: cash_payment
+    weight: 8
+    when:
+      all:
+        - {field: payment_method, op: eq, value: cash}
+        - {field: lead_time_hours, op: gte, value: 12}
+    reason: "Paid in cash."
