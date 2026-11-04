@@ -61,7 +61,7 @@ Optional finish: click **Send the certificate to the chat**. The chat reads the 
 | Problem | Fix |
 |---|---|
 | Page shows "Couldn't reach the demo database" | Run `make seed`, then reload. |
-| The fake photo comes back "please type the number" | Tesseract isn't installed. Type `999-47182030` into the chat. |
+| The fake photo comes back "please type the number" | Tesseract isn't installed, or OCR took longer than 12 seconds and gave up. Type `999-47182030` into the chat. |
 | Numbers look different from rehearsal | Click Reset (top right). |
 | The HIGH booking's flight date is in the past | You seeded on an earlier day. Run `make demo` again. |
 | Port 8000 is busy | `make demo PORT=8010` |

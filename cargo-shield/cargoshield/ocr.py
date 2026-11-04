@@ -8,9 +8,15 @@ to type the number instead.
 from __future__ import annotations
 
 import io
+import os
 from functools import lru_cache
 
 from PIL import Image, ImageOps, UnidentifiedImageError
+
+# Tesseract's OpenMP threads busy-wait. With other work on the machine one image
+# can take minutes instead of a second, so run it single-threaded.
+os.environ.setdefault("OMP_THREAD_LIMIT", "1")
+OCR_TIMEOUT_S = 12  # give up and ask for the number rather than freeze the chat
 
 Image.MAX_IMAGE_PIXELS = 40_000_000  # refuse absurdly large images
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
@@ -81,8 +87,11 @@ def read_text(img: Image.Image) -> str | None:
     import pytesseract
 
     g = _prep(img)
-    text = pytesseract.image_to_string(g)
-    # A second pass treating the page as one block helps with tilted photos.
-    if sum(ch.isdigit() for ch in text) < 11:
-        text += "\n" + pytesseract.image_to_string(g, config="--psm 6")
+    try:
+        text = pytesseract.image_to_string(g, timeout=OCR_TIMEOUT_S)
+        # A second pass treating the page as one block helps with tilted photos.
+        if sum(ch.isdigit() for ch in text) < 11:
+            text += "\n" + pytesseract.image_to_string(g, config="--psm 6", timeout=OCR_TIMEOUT_S)
+    except RuntimeError:  # pytesseract raises RuntimeError on timeout
+        return ""
     return text
