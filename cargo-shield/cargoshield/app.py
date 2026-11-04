@@ -1,0 +1,497 @@
+"""CargoShield web app: API and dashboard in one FastAPI process."""
+
+from __future__ import annotations
+
+import html
+import json
+import secrets
+import sqlite3
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, Iterator, Literal
+from urllib.parse import urlparse
+
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from . import anomaly, awb as awbmod, commodity, config, db, evaluation, fakes, graph, messaging, ocr, policies, risk
+from . import simulate, stats, verify
+
+STATIC = Path(__file__).with_name("static")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.model = None
+    try:
+        app.state.model = anomaly.load()
+    except FileNotFoundError:
+        pass  # endpoints that need it explain how to seed
+    yield
+
+
+app = FastAPI(title="CargoShield demo", version="0.1.0", lifespan=lifespan,
+              description="Trust and risk layer for a cargo airline. Demo data only.")
+app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+
+# ------------------------------------------------------------------ plumbing
+
+
+def get_conn() -> Iterator[sqlite3.Connection]:
+    if not config.db_path().exists():
+        raise HTTPException(503, "No demo database yet. Run `make seed` (or `python -m cargoshield.seed`).")
+    conn = db.connect()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def get_model(request: Request) -> anomaly.AnomalyModel:
+    if request.app.state.model is None:
+        try:
+            request.app.state.model = anomaly.load()
+        except FileNotFoundError:
+            raise HTTPException(503, "No anomaly model yet. Run `make seed` first.")
+    return request.app.state.model
+
+
+def base_url(request: Request) -> str:
+    configured = str(config.settings()["server"].get("public_base_url") or "auto")
+    return str(request.base_url).rstrip("/") if configured == "auto" else configured.rstrip("/")
+
+
+def trusted_hosts(request: Request) -> set[str]:
+    hosts = {"localhost", "127.0.0.1"}
+    if request.url.hostname:
+        hosts.add(request.url.hostname)
+    configured = str(config.settings()["server"].get("public_base_url") or "auto")
+    if configured != "auto" and urlparse(configured).hostname:
+        hosts.add(urlparse(configured).hostname)
+    return hosts
+
+
+def wants_html(request: Request) -> bool:
+    fmt = request.query_params.get("format")
+    if fmt:
+        return fmt == "html"
+    accept = request.headers.get("accept", "")
+    return "text/html" in accept and "application/json" not in accept
+
+
+def _row(r: sqlite3.Row | None) -> dict[str, Any] | None:
+    return dict(r) if r is not None else None
+
+
+# ------------------------------------------------------------------ dashboard
+
+
+@app.get("/", include_in_schema=False)
+def index() -> FileResponse:
+    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/health")
+def health() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "database": config.db_path().exists(),
+        "model": config.model_path().exists(),
+        "ocr": ocr.tesseract_available(),
+        "qr": ocr.qr_available(),
+    }
+
+
+@app.get("/api/stats")
+def api_stats(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    return stats.kpis(conn)
+
+
+@app.get("/api/demo")
+def api_demo(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    meta = db.get_meta(conn, "demo", {})
+    report = evaluation.engine_report(conn)
+    report.pop("missed_awbs", None)
+    return {
+        "airline": config.airline_name(),
+        "seeded_at": db.get_meta(conn, "seeded_at"),
+        "hero_high_booking_id": meta.get("hero_high_booking_id"),
+        "hero_high_awb": awbmod.fmt(meta.get("hero_high_awb", "")),
+        "hero_clean_booking_id": meta.get("hero_clean_booking_id"),
+        "hero_clean_awb": awbmod.fmt(meta.get("hero_clean_awb", "")),
+        "demo_fake": meta.get("demo_fake"),
+        "engine_check": report,
+        "ocr": ocr.tesseract_available(),
+        "qr": ocr.qr_available(),
+    }
+
+
+_BOOKING_LIST_SQL = """
+SELECT b.id, b.awb, b.origin, b.destination, b.flight_date, b.commodity_text, b.commodity_class,
+       b.weight_kg, b.declared_value_usd, b.booked_at, b.status,
+       r.score, r.band, r.reasons_json,
+       (SELECT COUNT(*) FROM policy p WHERE p.booking_id = b.id AND p.status = 'active') AS policies
+FROM booking b JOIN risk_score r ON r.booking_id = b.id
+"""
+
+
+def _list_item(r: sqlite3.Row) -> dict[str, Any]:
+    reasons = json.loads(r["reasons_json"])
+    top = next((x["text"] for x in reasons if x["kind"] == "rule"), None)
+    return {
+        "id": r["id"], "awb": awbmod.fmt(r["awb"]), "origin": r["origin"], "destination": r["destination"],
+        "flight_date": r["flight_date"], "commodity_text": r["commodity_text"],
+        "commodity_label": commodity.label(r["commodity_class"]), "weight_kg": r["weight_kg"],
+        "declared_value_usd": r["declared_value_usd"], "booked_at": r["booked_at"], "status": r["status"],
+        "score": r["score"], "band": r["band"], "top_reason": top, "reason_count": len(reasons),
+        "has_policy": bool(r["policies"]),
+    }
+
+
+@app.get("/api/bookings")
+def api_bookings(
+    conn: sqlite3.Connection = Depends(get_conn),
+    band: Literal["LOW", "MEDIUM", "HIGH", "FLAGGED"] | None = None,
+    q: str | None = Query(None, max_length=60),
+    sort: Literal["recent", "score"] = "recent",
+    limit: int = Query(60, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    where, args = [], []
+    if band == "FLAGGED":
+        where.append("r.band IN ('MEDIUM', 'HIGH')")
+    elif band:
+        where.append("r.band = ?")
+        args.append(band)
+    if q:
+        digits = "".join(ch for ch in q if ch.isdigit())
+        like = f"%{q.strip()}%"
+        clause = "(b.commodity_text LIKE ? OR b.origin LIKE ? OR b.destination LIKE ?"
+        args += [like, like, like]
+        if digits:
+            clause += " OR b.awb LIKE ?"
+            args.append(f"%{digits}%")
+        where.append(clause + ")")
+    sql = _BOOKING_LIST_SQL + (" WHERE " + " AND ".join(where) if where else "")
+    total = conn.execute(f"SELECT COUNT(*) FROM ({sql})", args).fetchone()[0]
+    order = "r.score DESC, b.booked_at DESC" if sort == "score" else "b.booked_at DESC"
+    rows = conn.execute(f"{sql} ORDER BY {order} LIMIT ? OFFSET ?", [*args, limit, offset]).fetchall()
+    return {"total": total, "items": [_list_item(r) for r in rows]}
+
+
+def _booking_detail(conn: sqlite3.Connection, booking_id: int, request: Request) -> dict[str, Any]:
+    b = conn.execute("SELECT * FROM booking WHERE id = ?", (booking_id,)).fetchone()
+    if b is None:
+        raise HTTPException(404, "No such booking")
+    s = conn.execute("SELECT * FROM shipper WHERE id = ?", (b["shipper_id"],)).fetchone()
+    flagged = graph.flagged_shippers(conn)
+    age_days = (db.parse_dt(b["booked_at"]) - db.parse_dt(s["created_at"])).days
+    nb = conn.execute("SELECT COUNT(*) FROM booking WHERE shipper_id = ?", (s["id"],)).fetchone()[0]
+    p = policies.for_booking(conn, booking_id)
+    q = policies.quote_booking(conn, booking_id)
+    reviews = [dict(r) for r in conn.execute(
+        "SELECT decision, note, decided_by, decided_at FROM review_decision WHERE booking_id = ? ORDER BY id", (booking_id,))]
+    volume = b["volume_m3"]
+    return {
+        "booking": {
+            **dict(b),
+            "awb": awbmod.fmt(b["awb"]),
+            "commodity_label": commodity.label(b["commodity_class"]),
+            "payment_label": commodity.payment_label(b["payment_method"]),
+            "density_kg_m3": round(b["weight_kg"] / volume) if volume else None,
+            "payment_ref": graph.mask("payment_ref", b["payment_ref"]) if b["payment_ref"] else None,
+        },
+        "shipper": {  # internal staff view; contact details masked
+            "id": s["id"], "name": s["name"], "country": s["country"], "kyc_status": s["kyc_status"],
+            "account_age_days_at_booking": age_days, "created_at": s["created_at"],
+            "phone": graph.mask("phone", s["phone"]), "email": graph.mask("email", s["email"]),
+            "bookings": nb, "flagged": s["id"] in flagged, "flag_reason": flagged.get(s["id"]),
+        },
+        "risk": risk.explain(conn, booking_id),
+        "quote": q.to_dict(),
+        "policy": policies.to_dict(p, base_url(request)) if p else None,
+        "reviews": reviews,
+    }
+
+
+@app.get("/api/bookings/{booking_id}")
+def api_booking(booking_id: int, request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    return _booking_detail(conn, booking_id, request)
+
+
+class NewBooking(BaseModel):
+    shipper_id: int
+    origin: str = Field(min_length=3, max_length=3)
+    destination: str = Field(min_length=3, max_length=3)
+    flight_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    commodity_text: str = Field(min_length=2, max_length=120)
+    pieces: int = Field(ge=1, le=10000)
+    weight_kg: float = Field(gt=0, le=150000)
+    volume_m3: float = Field(gt=0, le=1000)
+    declared_value_usd: float = Field(ge=0, le=1e9)
+    payment_method: Literal["credit_account", "bank_transfer", "card", "mobile_money", "cash", "third_party"]
+    payment_ref: str | None = Field(None, max_length=60)
+    lead_time_hours: float = Field(ge=0, le=24 * 365)
+    awb: str | None = None
+
+
+@app.post("/api/bookings", status_code=201)
+def api_new_booking(body: NewBooking, request: Request, conn: sqlite3.Connection = Depends(get_conn),
+                    model: anomaly.AnomalyModel = Depends(get_model)) -> dict[str, Any]:
+    """Screen a new booking: store it, score it, route it (HIGH -> review queue)."""
+    if not conn.execute("SELECT 1 FROM shipper WHERE id = ?", (body.shipper_id,)).fetchone():
+        raise HTTPException(422, "Unknown shipper_id")
+    if body.awb:
+        chk = awbmod.validate(body.awb)
+        if not chk.ok:
+            raise HTTPException(422, f"AWB {body.awb} is not valid ({chk.status})")
+        number = chk.awb
+    else:
+        used = {r[0][3:10] for r in conn.execute("SELECT awb FROM booking")} | fakes.RESERVED_SERIALS
+        while True:
+            serial = f"{secrets.randbelow(9_000_000) + 1_000_000}"
+            if serial not in used:
+                break
+        number = awbmod.make(config.awb_prefix(), serial)
+    if conn.execute("SELECT 1 FROM booking WHERE awb = ?", (number,)).fetchone():
+        raise HTTPException(409, "AWB already exists")
+    cur = conn.execute(
+        "INSERT INTO booking (awb, shipper_id, origin, destination, flight_date, commodity_text, commodity_class, "
+        "pieces, weight_kg, volume_m3, declared_value_usd, payment_method, payment_ref, booked_at, lead_time_hours, "
+        "status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')",
+        (number, body.shipper_id, body.origin.upper(), body.destination.upper(), body.flight_date,
+         body.commodity_text, commodity.classify(body.commodity_text), body.pieces, body.weight_kg, body.volume_m3,
+         body.declared_value_usd, body.payment_method, body.payment_ref, db.iso(db.utcnow()), body.lead_time_hours),
+    )
+    bid = int(cur.lastrowid)
+    graph.add_links_for_booking(conn, body.shipper_id, body.payment_ref)
+    conn.commit()
+    risk.screen_booking(conn, bid, model)
+    return _booking_detail(conn, bid, request)
+
+
+@app.post("/api/demo/simulate")
+def api_simulate(request: Request, conn: sqlite3.Connection = Depends(get_conn),
+                 model: anomaly.AnomalyModel = Depends(get_model)) -> dict[str, Any]:
+    bid = simulate.simulate_booking(conn, model)
+    r = conn.execute(_BOOKING_LIST_SQL + " WHERE b.id = ?", (bid,)).fetchone()
+    return _list_item(r)
+
+
+@app.get("/api/review-queue")
+def api_review_queue(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    rows = conn.execute(
+        _BOOKING_LIST_SQL + " WHERE b.status IN ('in_review', 'on_hold') ORDER BY b.status = 'on_hold', r.score DESC, b.booked_at DESC"
+    ).fetchall()
+    decided = conn.execute(
+        """SELECT d.booking_id, d.decision, d.note, d.decided_at, b.awb, r.score
+           FROM review_decision d JOIN booking b ON b.id = d.booking_id JOIN risk_score r ON r.booking_id = b.id
+           ORDER BY d.id DESC LIMIT 20"""
+    ).fetchall()
+    items = []
+    for r in rows:
+        item = _list_item(r)
+        item["reasons"] = json.loads(r["reasons_json"])
+        items.append(item)
+    return {"items": items,
+            "recent_decisions": [{**dict(d), "awb": awbmod.fmt(d["awb"])} for d in decided]}
+
+
+class ReviewBody(BaseModel):
+    decision: Literal["approve", "hold", "reject"]
+    note: str | None = Field(None, max_length=500)
+    reviewer: str = Field("Demo reviewer", max_length=60)
+
+
+@app.post("/api/review/{booking_id}")
+def api_review(booking_id: int, body: ReviewBody, conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    b = conn.execute("SELECT status FROM booking WHERE id = ?", (booking_id,)).fetchone()
+    if b is None:
+        raise HTTPException(404, "No such booking")
+    if b["status"] not in ("in_review", "on_hold"):
+        raise HTTPException(409, f"Booking is {b['status']}, not waiting for review")
+    if body.decision == "reject" and not (body.note or "").strip():
+        raise HTTPException(422, "Add a note saying why before rejecting")
+    status = {"approve": "accepted", "hold": "on_hold", "reject": "rejected"}[body.decision]
+    conn.execute("INSERT INTO review_decision (booking_id, decision, note, decided_by, decided_at) VALUES (?, ?, ?, ?, ?)",
+                 (booking_id, body.decision, (body.note or "").strip() or None, body.reviewer, db.iso(db.utcnow())))
+    conn.execute("UPDATE booking SET status = ? WHERE id = ?", (status, booking_id))
+    conn.commit()
+    return {"booking_id": booking_id, "status": status}
+
+
+# ------------------------------------------------------------------ graph
+
+
+@app.get("/graph/shipper/{shipper_id}")
+def graph_shipper(shipper_id: int, hops: int = Query(2, ge=1, le=3),
+                  conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    try:
+        return graph.subgraph(conn, shipper_id, hops)
+    except KeyError:
+        raise HTTPException(404, "No such shipper")
+
+
+# ------------------------------------------------------------------ cover
+
+
+@app.get("/api/quote/{booking_id}")
+def api_quote(booking_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    try:
+        return policies.quote_booking(conn, booking_id).to_dict()
+    except KeyError:
+        raise HTTPException(404, "No such booking")
+
+
+class IssueBody(BaseModel):
+    booking_id: int
+
+
+@app.post("/api/policies", status_code=201)
+def api_issue(body: IssueBody, request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    try:
+        p = policies.issue(conn, body.booking_id)
+    except KeyError:
+        raise HTTPException(404, "No such booking")
+    except policies.CoverError as e:
+        raise HTTPException(409, str(e))
+    return policies.to_dict(p, base_url(request))
+
+
+@app.get("/api/policies/{pid}/qr.png")
+def api_policy_qr(pid: int, request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> Response:
+    p = policies.get(conn, pid)
+    if p is None:
+        raise HTTPException(404, "No such policy")
+    return Response(policies.qr_png(policies.verify_url(base_url(request), p["qr_token"])), media_type="image/png")
+
+
+@app.get("/api/policies/{pid}/certificate.png")
+def api_policy_certificate(pid: int, request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> Response:
+    try:
+        png = policies.certificate_png(conn, pid, base_url(request))
+    except KeyError:
+        raise HTTPException(404, "No such policy")
+    return Response(png, media_type="image/png",
+                    headers={"Content-Disposition": f'inline; filename="{policies.policy_no(pid)}.png"'})
+
+
+# ------------------------------------------------------------------ verify (public)
+
+
+def _result_page(res: verify.VerifyResult) -> HTMLResponse:
+    colours = {"GENUINE": ("#0f7b4f", "#e8f6ef"), "NOT FOUND": ("#b42318", "#fdecea"),
+               "SUSPICIOUS": ("#b54708", "#fef4e6"), "INVALID FORMAT": ("#475467", "#f2f4f7"),
+               "NOT ACTIVE": ("#b54708", "#fef4e6"), "UNREADABLE": ("#475467", "#f2f4f7")}
+    fg, bg = colours.get(res.result, ("#475467", "#f2f4f7"))
+    rows = ""
+    labels = {"awb": "Air waybill", "origin": "From", "destination": "To", "flight_date": "Flight date",
+              "pieces": "Pieces", "weight_kg": "Weight (kg)", "carriage_status": "Status", "policy_no": "Cover",
+              "route": "Route", "sum_insured_usd": "Sum insured (USD)", "status": "Status", "issued_at": "Issued"}
+    for k, v in (res.details or {}).items():
+        if isinstance(v, float):
+            v = f"{v:,.2f}" if k.endswith("usd") else f"{v:,.0f}"
+        elif k in ("flight_date", "issued_at") and isinstance(v, str):
+            v = verify._nice_date(v[:10])
+        elif k == "status" and isinstance(v, str):
+            v = v.capitalize()
+        rows += f"<tr><th>{html.escape(labels.get(k, k))}</th><td>{html.escape(str(v))}</td></tr>"
+    airline = html.escape(config.airline_name())
+    body = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>CargoShield verification</title>
+<style>
+body{{margin:0;font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#f5f6f8;color:#101828}}
+main{{max-width:480px;margin:0 auto;padding:24px 16px}}
+.brand{{font-weight:700;letter-spacing:.02em}} .sub{{color:#667085;font-size:13px}}
+.card{{background:#fff;border-radius:14px;padding:20px;margin-top:16px;box-shadow:0 1px 3px rgba(16,24,40,.08)}}
+.result{{display:inline-block;padding:6px 12px;border-radius:999px;font-weight:700;color:{fg};background:{bg}}}
+table{{width:100%;border-collapse:collapse;margin-top:12px}} th{{text-align:left;color:#667085;font-weight:500;padding:6px 0;width:45%}}
+td{{padding:6px 0}} footer{{color:#667085;font-size:12px;margin-top:20px}}
+</style></head><body><main>
+<div class="brand">CargoShield</div><div class="sub">Verification for {airline}</div>
+<div class="card"><span class="result">{html.escape(res.result)}</span>
+<p>{html.escape(res.message)}</p><table>{rows}</table></div>
+<footer>Demo data built on the public flight schedule. Synthetic records only.</footer>
+</main></body></html>"""
+    return HTMLResponse(body)
+
+
+@app.get("/verify/awb/{awb_text}")
+def verify_awb(awb_text: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    html_view = wants_html(request)
+    res = verify.verify_awb(conn, awb_text, channel="web" if html_view else "api", input_type="text")
+    return _result_page(res) if html_view else res.to_dict()
+
+
+@app.post("/verify/image")
+async def verify_image(request: Request, file: UploadFile = File(...), conn: sqlite3.Connection = Depends(get_conn)):
+    data = await file.read(ocr.MAX_UPLOAD_BYTES + 1)
+    res = verify.verify_image(conn, data, channel="api", trusted_hosts=trusted_hosts(request))
+    if res.result == verify.UNREADABLE:
+        payload = res.to_dict()
+        payload["ask"] = "Please type the air waybill number."
+        return JSONResponse(payload, status_code=200)
+    return res.to_dict()
+
+
+@app.get("/verify/policy/{qr_token}")
+def verify_policy(qr_token: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    html_view = wants_html(request)
+    res = verify.verify_policy(conn, qr_token, channel="qr-scan" if html_view else "api", input_type="qr")
+    return _result_page(res) if html_view else res.to_dict()
+
+
+# ------------------------------------------------------------------ chat simulator
+
+
+@app.post("/api/chat")
+async def api_chat(request: Request, text: str | None = Form(None), image: UploadFile | None = File(None),
+                   conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    data = await image.read(ocr.MAX_UPLOAD_BYTES + 1) if image is not None else None
+    msg = messaging.IncomingMessage(channel="whatsapp-sim", sender="demo-user", text=text, image=data or None,
+                                    image_mime=image.content_type if image is not None else None)
+    return messaging.handle_message(conn, msg, trusted_hosts=trusted_hosts(request)).to_dict()
+
+
+@app.get("/api/verifications")
+def api_verifications(limit: int = Query(25, ge=1, le=200), conn: sqlite3.Connection = Depends(get_conn)):
+    return [dict(r) for r in conn.execute(
+        "SELECT id, channel, input_type, input_value, result, checked_at FROM verification_log "
+        "ORDER BY checked_at DESC, id DESC LIMIT ?", (limit,))]
+
+
+@app.get("/api/documents")
+def api_documents(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    meta = db.get_meta(conn, "demo", {})
+    fake_list = [{"name": f.filename, "url": f"/files/fakes/{f.filename}", "kind": f.kind,
+                  "expected": f.expected, "story": f.story}
+                 for f in fakes.FAKES if (config.fakes_dir() / f.filename).exists()]
+    samples = [{"name": n, "url": f"/files/samples/{n}", "kind": "awb", "expected": "GENUINE",
+                "story": "A genuine air waybill for a real (synthetic) booking."}
+               for n in meta.get("samples", []) if (config.samples_dir() / n).exists()]
+    return {"fakes": fake_list, "samples": samples}
+
+
+@app.get("/files/{folder}/{name}", include_in_schema=False)
+def files(folder: Literal["fakes", "samples"], name: str, conn: sqlite3.Connection = Depends(get_conn)):
+    allowed = ({f.filename for f in fakes.FAKES} if folder == "fakes"
+               else set(db.get_meta(conn, "demo", {}).get("samples", [])))
+    if name not in allowed:
+        raise HTTPException(404, "Not found")
+    path = (config.fakes_dir() if folder == "fakes" else config.samples_dir()) / name
+    if not path.exists():
+        raise HTTPException(404, "Not found")
+    return FileResponse(path)
+
+
+# ------------------------------------------------------------------ presenter tools
+
+
+@app.post("/api/admin/reset")
+def api_reset() -> dict[str, Any]:
+    """Restore the demo start state (presenter use; the server listens on localhost by default)."""
+    db.restore()
+    return {"ok": True}

@@ -76,11 +76,31 @@ def test_anomaly_points_only_for_the_unusual_tail():
 
 
 def test_engine_never_reads_ground_truth():
+    """No code (docstrings aside) in the engine touches the seed's answers."""
+    import ast
+
     src = Path(risk.__file__).parent
-    for name in ("risk.py", "features.py", "anomaly.py", "graph.py", "pricing.py", "verify.py", "messaging.py"):
-        text = (src / name).read_text()
-        assert "is_planted_fraud" not in text, name
-        assert "seed_truth" not in text, name
+    for name in ("risk.py", "features.py", "anomaly.py", "graph.py", "pricing.py", "verify.py", "messaging.py",
+                 "policies.py", "simulate.py"):
+        tree = ast.parse((src / name).read_text())
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+                first = node.body[0]
+                if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                    docstrings.add(id(first.value))
+        for node in ast.walk(tree):
+            text = None
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+                text = node.value
+            elif isinstance(node, ast.Name):
+                text = node.id
+            elif isinstance(node, ast.Attribute):
+                text = node.attr
+            if text and name != "simulate.py":
+                assert "is_planted_fraud" not in text, name
+            if text:
+                assert "seed_truth" not in text, name
 
 
 def test_rules_are_tunable_from_yaml(tmp_path, conn, monkeypatch):

@@ -122,6 +122,7 @@ rules:
     when:
       all:
         - {field: lead_time_hours, op: lt, value: 6}
+        - {field: payment_method, op: not_in, value: [cash, third_party]}
     reason: "Booked only {lead_time_hours:.0f} hours before departure."
 
   - id: cash_payment

@@ -65,8 +65,8 @@ def quote(declared_value_usd: float, weight_kg: float, commodity_class: str, ban
 
     multipliers = c["risk_multiplier"]
     if band not in multipliers:
-        q.reason = (f"{band.title()} risk bookings go to manual review. Cover can be offered once a "
-                    "reviewer approves the booking and it is rescored.") if band == "HIGH" else f"No cover for band {band}."
+        q.reason = ("Cover is only offered on LOW and MEDIUM risk bookings. HIGH risk bookings go to a "
+                    "person in the review queue instead.") if band == "HIGH" else f"No cover for band {band}."
         return q
 
     q.liability_sdr_per_kg = float(c["carrier_liability_sdr_per_kg"])

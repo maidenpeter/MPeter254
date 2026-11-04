@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CargoShield</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2 4 6v9c0 7.5 5.1 13.4 12 15 6.9-1.6 12-7.5 12-15V6z' fill='%230e5e6f'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/vendor/vis-network.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2 4 6v9c0 7.5 5.1 13.4 12 15 6.9-1.6 12-7.5 12-15V6z"/><path class="tick" d="m10.5 16 4 4 7-8"/></svg>
+      <div>
+        <div class="brand-name">CargoShield</div>
+        <div class="brand-sub">Trust and risk layer for <span id="airline">Demo Airline</span></div>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="data-badge" title="All shippers, bookings and documents are generated. Nothing comes from the airline's systems.">Demo data built on the public flight schedule</span>
+      <button class="btn ghost" id="btn-path" aria-expanded="false">Demo path</button>
+      <button class="btn ghost small" id="btn-reset" title="Put the demo back to its starting state">Reset</button>
+    </div>
+  </header>
+
+  <div class="path-panel" id="path-panel" hidden>
+    <div class="path-title">The 3-minute demo <button id="path-close" aria-label="Hide demo path">×</button></div>
+    <ol>
+      <li><button class="link" data-step="1">1. Send a fake AWB photo to the chat</button><span>Comes back NOT FOUND, with a warning not to pay.</span></li>
+      <li><button class="link" data-step="2">2. Open the HIGH booking <b id="path-high"></b></button><span>Reasons, then the fraud ring.</span></li>
+      <li><button class="link" data-step="3">3. Open the clean booking <b id="path-clean"></b></button><span>Quote, issue cover, scan the QR: GENUINE.</span></li>
+    </ol>
+    <div class="path-mini"><b>Demo</b><button data-step="1" title="Fake AWB photo">1</button><button data-step="2" title="HIGH booking and fraud ring">2</button><button data-step="3" title="Clean booking, cover, QR">3</button><button class="more" id="path-expand" title="Show the steps">steps</button></div>
+  </div>
+
+  <section class="kpis" aria-label="Headline numbers">
+    <div class="kpi"><div class="kpi-label">Bookings screened</div><div class="kpi-value" id="k-screened">–</div><div class="kpi-foot" id="k-screened-foot">every booking scored before acceptance</div></div>
+    <div class="kpi"><div class="kpi-label">Flagged for review</div><div class="kpi-value warn" id="k-flagged">–</div><div class="kpi-foot" id="k-flagged-foot">&nbsp;</div></div>
+    <div class="kpi"><div class="kpi-label">Policies issued</div><div class="kpi-value" id="k-policies">–</div><div class="kpi-foot" id="k-policies-foot">&nbsp;</div></div>
+    <div class="kpi"><div class="kpi-label">Premium written</div><div class="kpi-value" id="k-premium">–</div><div class="kpi-foot">illustrative pricing</div></div>
+    <div class="kpi"><div class="kpi-label">Fakes caught</div><div class="kpi-value bad" id="k-fakes">–</div><div class="kpi-foot" id="k-fakes-foot">&nbsp;</div></div>
+  </section>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" class="tab active" data-tab="bookings" aria-selected="true">Bookings</button>
+    <button role="tab" class="tab" data-tab="review" aria-selected="false">Review queue <span class="count" id="review-count">0</span></button>
+    <button role="tab" class="tab" data-tab="verify" aria-selected="false">Verify</button>
+  </nav>
+
+  <main>
+    <!-- Bookings -->
+    <section class="panel" id="tab-bookings" role="tabpanel">
+      <div class="toolbar">
+        <input type="search" id="search" placeholder="Search AWB, airport or goods" aria-label="Search bookings">
+        <div class="segmented" id="band-filter" role="group" aria-label="Filter by risk band">
+          <button data-band="" class="on">All</button>
+          <button data-band="FLAGGED">Flagged</button>
+          <button data-band="HIGH">High</button>
+          <button data-band="MEDIUM">Medium</button>
+          <button data-band="LOW">Low</button>
+        </div>
+        <select id="sort" aria-label="Sort">
+          <option value="recent">Newest first</option>
+          <option value="score">Highest score first</option>
+        </select>
+        <label class="live"><input type="checkbox" id="live"> <span>Live feed</span></label>
+      </div>
+      <div class="table-wrap">
+        <table class="bookings">
+          <thead><tr>
+            <th>AWB</th><th>Route</th><th>Flight</th><th>Goods</th><th class="num">Weight</th>
+            <th class="num">Declared value</th><th>Score</th><th>Main reason</th>
+          </tr></thead>
+          <tbody id="booking-rows"></tbody>
+        </table>
+      </div>
+      <div class="list-foot"><span id="list-count"></span><button class="btn ghost small" id="more">Load more</button></div>
+    </section>
+
+    <!-- Review queue -->
+    <section class="panel" id="tab-review" role="tabpanel" hidden>
+      <div class="engine-check" id="engine-check"></div>
+      <p class="hint">HIGH bookings wait here for a person. The engine never rejects anything on its own.</p>
+      <div id="review-list" class="review-list"></div>
+      <h3 class="section-title">Recent decisions</h3>
+      <div id="review-decisions" class="decisions"></div>
+    </section>
+
+    <!-- Verify -->
+    <section class="panel" id="tab-verify" role="tabpanel" hidden>
+      <div class="verify-grid">
+        <div class="phone" id="phone">
+          <div class="phone-head">
+            <div class="avatar">CS</div>
+            <div><div class="phone-title">CargoShield check</div><div class="phone-sub">Chat simulator (WhatsApp-style)</div></div>
+          </div>
+          <div class="chat" id="chat" aria-live="polite"></div>
+          <form class="composer" id="composer">
+            <label class="attach" title="Send a photo"><input type="file" id="file" accept="image/*" hidden>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.5v10a4.5 4.5 0 0 1-9 0V5a3 3 0 0 1 6 0v10.5a1.5 1.5 0 0 1-3 0V6.5"/></svg>
+            </label>
+            <input type="text" id="msg" placeholder="Type an AWB number, e.g. 999-12345675" autocomplete="off" aria-label="Message">
+            <button class="send" type="submit" aria-label="Send"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11.5 21 3l-8.5 18-2-7.5z"/></svg></button>
+          </form>
+          <div class="drop-hint" id="drop-hint">Drop the photo to send it</div>
+        </div>
+        <div class="verify-side">
+          <h3 class="section-title">Try a document</h3>
+          <p class="hint">Click one to send it into the chat, as a customer would from their phone.</p>
+          <div class="docs" id="docs"></div>
+          <h3 class="section-title">Recent checks</h3>
+          <table class="log"><thead><tr><th>When</th><th>Channel</th><th>Input</th><th>Result</th></tr></thead><tbody id="log-rows"></tbody></table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Booking detail drawer -->
+  <div class="scrim" id="scrim" hidden></div>
+  <aside class="drawer" id="drawer" aria-hidden="true" aria-label="Booking detail">
+    <div class="drawer-inner" id="drawer-body"></div>
+  </aside>
+
+  <footer class="foot">
+    Synthetic demo. Shippers, bookings and documents are generated; insurance prices are illustrative, not real rates.
+    Verification answers never show shipper personal data, and risk flags stay internal.
+  </footer>
+  <div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>
