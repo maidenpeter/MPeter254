@@ -145,12 +145,15 @@ class RiskResult:
 
 
 def anomaly_points(percentile: float | None) -> int:
+    """Supporting points from the model. Too small to report means zero, so the
+    reasons shown always add up to the score (before the 100 cap)."""
     if percentile is None:
         return 0
     a = config.rules_config()["anomaly"]
     trig = float(a["trigger_percentile"])
     frac = (percentile - trig) / max(1.0 - trig, 1e-9)
-    return int(round(float(a["max_points"]) * min(max(frac, 0.0), 1.0)))
+    pts = int(round(float(a["max_points"]) * min(max(frac, 0.0), 1.0)))
+    return pts if pts >= int(a["min_points_to_report"]) else 0
 
 
 def combine(hits: Sequence[RuleHit], anomaly: Mapping[str, Any] | None) -> RiskResult:
@@ -166,7 +169,7 @@ def combine(hits: Sequence[RuleHit], anomaly: Mapping[str, Any] | None) -> RiskR
     if anomaly is not None:
         hit_rows.append({"id": "anomaly_model", "points": pts, "kind": "model",
                          "percentile": round(pct, 4), "driver": anomaly.get("driver")})
-        if pts >= int(a["min_points_to_report"]):
+        if pts:
             reasons.append({
                 "rule_id": "anomaly_model",
                 "text": (f"Unusual compared with past bookings: more unusual than {pct:.0%} of them, "
@@ -226,7 +229,9 @@ def score_all(conn: sqlite3.Connection, model: AnomalyModel) -> dict[str, Any]:
     anomalies = model.score(base_feats)
 
     # Pass 1: each booking on its own evidence.
-    flagged = set(graph.flagged_shippers(conn))  # watchlist + rejected; risk_score may be empty here
+    # Start from facts only (watchlist, reviewer rejections), never from old scores,
+    # so rescoring after a rules.yaml change gives the same answer every time.
+    flagged = set(graph.flagged_shippers(conn, include_scores=False))
     for r, f, an in zip(rows, base_feats, anomalies):
         if combine(evaluate(rules, f, skip=graph_ids), an).score >= high_min:
             flagged.add(r["shipper_id"])

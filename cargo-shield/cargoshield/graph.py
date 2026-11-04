@@ -19,7 +19,6 @@ Flags are internal. Nothing here is ever shown to the public.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 from collections import defaultdict, deque
@@ -99,8 +98,12 @@ def base_score(rule_hits: Iterable[dict[str, Any]], graph_rule_ids: set[str], ca
     return min(100, int(round(total)))
 
 
-def flagged_shippers(conn: sqlite3.Connection) -> dict[int, str]:
-    """shipper_id -> reason they are flagged (internal only)."""
+def flagged_shippers(conn: sqlite3.Connection, include_scores: bool = True) -> dict[int, str]:
+    """shipper_id -> reason they are flagged (internal only).
+
+    include_scores=False leaves out flags that come from stored risk scores; a
+    full rescore uses that so a rule change never starts from old scores.
+    """
     from . import config
 
     rcfg = config.rules_config()
@@ -116,6 +119,8 @@ def flagged_shippers(conn: sqlite3.Connection) -> dict[int, str]:
         "WHERE d.decision = 'reject'"
     ):
         flagged.setdefault(r["shipper_id"], "A booking was rejected after review")
+    if not include_scores:
+        return flagged
     for r in conn.execute(
         "SELECT b.shipper_id, r.rule_hits_json FROM risk_score r JOIN booking b ON b.id = r.booking_id "
         "WHERE r.score >= ?",
@@ -141,10 +146,6 @@ def mask(id_type: str, value: str) -> str:
         local, _, domain = value.partition("@")
         return f"{local[:1]}•••@{domain[:1]}•••{domain[domain.rfind('.'):] if '.' in domain else ''}"
     return f"{value[:4]}••••{value[-2:]}"
-
-
-def _ident_node_id(id_type: str, value: str) -> str:
-    return f"{id_type}:{hashlib.sha256(value.encode()).hexdigest()[:12]}"
 
 
 def subgraph(conn: sqlite3.Connection, shipper_id: int, hops: int = 2) -> dict[str, Any]:
@@ -204,29 +205,30 @@ def subgraph(conn: sqlite3.Connection, shipper_id: int, hops: int = 2) -> dict[s
             "flag_reason": flagged.get(sid),
             "is_center": sid == shipper_id,
         })
-    # identifiers shared by at least two shippers in view
-    seen: set[str] = set()
+    # Identifiers shared by at least two shippers in view. Node ids are opaque
+    # counters, never derived from the value, so the masked labels can't be undone.
+    ident_ids: dict[tuple[str, str], str] = {}
     for sid in ids:
         for (t, v) in sorted(idx.by_shipper.get(sid, ())):
             members = [m for m in idx.by_ident[(t, v)] if m in dist]
             if len(members) < 2:
                 continue
-            nid = _ident_node_id(t, v)
-            if nid not in seen:
-                seen.add(nid)
-                nodes.append({"id": nid, "kind": t, "label": mask(t, v), "shared_by": len(members)})
-            edges.append({"from": f"shipper:{sid}", "to": nid, "kind": t})
+            if (t, v) not in ident_ids:
+                ident_ids[(t, v)] = f"{t}:{len(ident_ids) + 1}"
+                nodes.append({"id": ident_ids[(t, v)], "kind": t, "label": mask(t, v), "shared_by": len(members)})
+            edges.append({"from": f"shipper:{sid}", "to": ident_ids[(t, v)], "kind": t})
 
-    ring_size = sum(1 for n in nodes if n["kind"] == "shipper")
-    flagged_in_view = sum(1 for n in nodes if n["kind"] == "shipper" and n["flagged"])
+    shippers = [n for n in nodes if n["kind"] == "shipper"]
     return {
         "center": shipper_id,
         "hops": hops,
         "nodes": nodes,
         "edges": edges,
         "summary": {
-            "connected_shippers": ring_size - 1,
-            "flagged_shippers": flagged_in_view,
-            "shared_identifiers": len(seen),
+            "connected_shippers": len(shippers) - 1,
+            "flagged_shippers": sum(1 for n in shippers if n["flagged"]),
+            "flagged_connected": sum(1 for n in shippers if n["flagged"] and not n["is_center"]),
+            "center_flagged": shipper_id in flagged,
+            "shared_identifiers": len(ident_ids),
         },
     }

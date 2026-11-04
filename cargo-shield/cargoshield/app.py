@@ -15,6 +15,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request,
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from . import anomaly, awb as awbmod, commodity, config, db, evaluation, fakes, graph, messaging, ocr, policies, risk
 from . import simulate, stats, verify
@@ -36,11 +37,56 @@ app = FastAPI(title="CargoShield demo", version="0.1.0", lifespan=lifespan,
               description="Trust and risk layer for a cargo airline. Demo data only.")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
+# Paths anyone may reach. Everything else is the staff dashboard and its API.
+PUBLIC_PREFIXES = ("/verify/",)
+LOCAL_CLIENTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+@app.middleware("http")
+async def guard(request: Request, call_next):
+    """Two cheap protections for a demo laptop on shared Wi-Fi.
+
+    1. Staff pages only for the presenter's own machine. A phone on the same
+       network (HOST=0.0.0.0, for scanning QR codes) can reach /verify/... and
+       nothing else. "Own machine" means loopback, or the same address the
+       server answered on (the laptop opening its own LAN address).
+    2. Writes must not come from another website (no cross-site form POSTs).
+    """
+    client = request.client.host if request.client else ""
+    server = (request.scope.get("server") or ("",))[0]
+    if not request.url.path.startswith(PUBLIC_PREFIXES) and client not in LOCAL_CLIENTS and client != server:
+        return JSONResponse({"detail": "Staff pages are only available on the presenter's laptop."}, status_code=403)
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = request.headers.get("origin")
+        if origin and urlparse(origin).netloc != request.headers.get("host"):
+            return JSONResponse({"detail": "Cross-site request refused."}, status_code=403)
+    return await call_next(request)
+
+
+_watched: dict[str, float] = {}
+
+
+def _changed(path: Path) -> bool:
+    try:
+        m = path.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    old = _watched.get(str(path))
+    _watched[str(path)] = m
+    return old is not None and old != m
+
 
 # ------------------------------------------------------------------ plumbing
 
 
+def _refresh_config() -> None:
+    """Pick up edits to the YAML config (e.g. after `make train`) without a restart."""
+    if any([_changed(config.config_dir() / n) for n in ("rules.yaml", "settings.yaml", "commodities.yaml")]):
+        config.reload()
+
+
 def get_conn() -> Iterator[sqlite3.Connection]:
+    _refresh_config()
     if not config.db_path().exists():
         raise HTTPException(503, "No demo database yet. Run `make seed` (or `python -m cargoshield.seed`).")
     conn = db.connect()
@@ -51,6 +97,9 @@ def get_conn() -> Iterator[sqlite3.Connection]:
 
 
 def get_model(request: Request) -> anomaly.AnomalyModel:
+    # Pick up a new model from `make train` without a restart.
+    if _changed(config.model_path()):
+        request.app.state.model = None
     if request.app.state.model is None:
         try:
             request.app.state.model = anomaly.load()
@@ -65,12 +114,9 @@ def base_url(request: Request) -> str:
 
 
 def trusted_hosts(request: Request) -> set[str]:
-    hosts = {"localhost", "127.0.0.1"}
+    hosts = verify.default_trusted_hosts()
     if request.url.hostname:
-        hosts.add(request.url.hostname)
-    configured = str(config.settings()["server"].get("public_base_url") or "auto")
-    if configured != "auto" and urlparse(configured).hostname:
-        hosts.add(urlparse(configured).hostname)
+        hosts.add(request.url.hostname.lower())
     return hosts
 
 
@@ -248,6 +294,10 @@ def api_new_booking(body: NewBooking, request: Request, conn: sqlite3.Connection
         chk = awbmod.validate(body.awb)
         if not chk.ok:
             raise HTTPException(422, f"AWB {body.awb} is not valid ({chk.status})")
+        if chk.prefix != config.awb_prefix():
+            raise HTTPException(422, f"AWB prefix must be {config.awb_prefix()}")
+        if chk.awb[3:10] in fakes.RESERVED_SERIALS:
+            raise HTTPException(422, "That AWB number is reserved for the demo's fake documents")
         number = chk.awb
     else:
         used = {r[0][3:10] for r in conn.execute("SELECT awb FROM booking")} | fakes.RESERVED_SERIALS
@@ -276,7 +326,10 @@ def api_new_booking(body: NewBooking, request: Request, conn: sqlite3.Connection
 @app.post("/api/demo/simulate")
 def api_simulate(request: Request, conn: sqlite3.Connection = Depends(get_conn),
                  model: anomaly.AnomalyModel = Depends(get_model)) -> dict[str, Any]:
-    bid = simulate.simulate_booking(conn, model)
+    try:
+        bid = simulate.simulate_booking(conn, model)
+    except sqlite3.IntegrityError:  # a reset landed mid-way; the next tick will work
+        raise HTTPException(409, "The demo was reset while this booking was being created. Try again.")
     r = conn.execute(_BOOKING_LIST_SQL + " WHERE b.id = ?", (bid,)).fetchone()
     return _list_item(r)
 
@@ -395,7 +448,7 @@ def _result_page(res: verify.VerifyResult) -> HTMLResponse:
         if isinstance(v, float):
             v = f"{v:,.2f}" if k.endswith("usd") else f"{v:,.0f}"
         elif k in ("flight_date", "issued_at") and isinstance(v, str):
-            v = verify._nice_date(v[:10])
+            v = verify.nice_date(v)
         elif k == "status" and isinstance(v, str):
             v = v.capitalize()
         rows += f"<tr><th>{html.escape(labels.get(k, k))}</th><td>{html.escape(str(v))}</td></tr>"
@@ -429,7 +482,7 @@ def verify_awb(awb_text: str, request: Request, conn: sqlite3.Connection = Depen
 @app.post("/verify/image")
 async def verify_image(request: Request, file: UploadFile = File(...), conn: sqlite3.Connection = Depends(get_conn)):
     data = await file.read(ocr.MAX_UPLOAD_BYTES + 1)
-    res = verify.verify_image(conn, data, channel="api", trusted_hosts=trusted_hosts(request))
+    res = await run_in_threadpool(verify.verify_image, conn, data, "api", trusted_hosts(request))
     if res.result == verify.UNREADABLE:
         payload = res.to_dict()
         payload["ask"] = "Please type the air waybill number."
@@ -453,7 +506,9 @@ async def api_chat(request: Request, text: str | None = Form(None), image: Uploa
     data = await image.read(ocr.MAX_UPLOAD_BYTES + 1) if image is not None else None
     msg = messaging.IncomingMessage(channel="whatsapp-sim", sender="demo-user", text=text, image=data or None,
                                     image_mime=image.content_type if image is not None else None)
-    return messaging.handle_message(conn, msg, trusted_hosts=trusted_hosts(request)).to_dict()
+    # OCR and QR decoding block for up to a few seconds: keep them off the event loop.
+    reply = await run_in_threadpool(messaging.handle_message, conn, msg, trusted_hosts(request))
+    return reply.to_dict()
 
 
 @app.get("/api/verifications")
@@ -492,6 +547,9 @@ def files(folder: Literal["fakes", "samples"], name: str, conn: sqlite3.Connecti
 
 @app.post("/api/admin/reset")
 def api_reset() -> dict[str, Any]:
-    """Restore the demo start state (presenter use; the server listens on localhost by default)."""
-    db.restore()
+    """Restore the demo start state (presenter's laptop only, see guard())."""
+    try:
+        db.restore()
+    except FileNotFoundError:
+        raise HTTPException(409, "No demo snapshot yet. Run `make seed` first.")
     return {"ok": True}

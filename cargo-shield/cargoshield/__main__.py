@@ -40,13 +40,20 @@ def cmd_seed(args) -> int:
 
 
 def cmd_train(args) -> int:
+    """Retrain and rescore from the demo starting state, then make that the new
+    starting state, so Reset keeps the tuned rules. A running app picks up the
+    new model and rules on its next request."""
     from . import anomaly, db, evaluation, risk
 
+    if config.snapshot_path().exists():
+        db.restore()
     conn = db.connect()
     model = anomaly.train(conn)
     anomaly.save(model)
     risk.score_all(conn, model)
+    db.snapshot(conn)
     print(evaluation.format_report(evaluation.engine_report(conn)))
+    print("Saved as the new demo starting state (what Reset restores).")
     conn.close()
     return 0
 

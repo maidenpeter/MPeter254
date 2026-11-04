@@ -13,7 +13,9 @@ const compactUsd = (v) => {
   if (v >= 1e4) return "$" + (v / 1e3).toFixed(1) + "k";
   return usd(v);
 };
-const parseIso = (iso) => new Date(iso.length === 10 ? iso + "T00:00:00" : iso);
+// The server stores naive UTC timestamps; show them in the viewer's local time.
+// Plain dates (flight dates) stay as calendar dates.
+const parseIso = (iso) => new Date(iso.length === 10 ? iso + "T00:00:00" : (/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + "Z"));
 const day = (iso) => parseIso(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 const dayShort = (iso) => parseIso(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 const stamp = (iso) => parseIso(iso).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
@@ -61,7 +63,7 @@ async function loadStats() {
   setKpi("#k-flagged", num(s.flagged_high), p && p.flagged_high);
   $("#k-flagged-foot").textContent = `HIGH, sent to a person · ${num(s.flagged_medium)} more MEDIUM`;
   setKpi("#k-policies", num(s.policies_issued), p && p.policies_issued);
-  $("#k-policies-foot").textContent = `${compactUsd(s.sum_insured_usd)} top-up cover in force`;
+  $("#k-policies-foot").textContent = `${compactUsd(s.sum_insured_usd)} top-up cover written`;
   setKpi("#k-premium", usd(s.premium_written_usd), p && p.premium_written_usd);
   setKpi("#k-fakes", num(s.fakes_caught), p && p.fakes_caught);
   $("#k-fakes-foot").textContent = `from ${num(s.checks_total)} verification checks`;
@@ -175,8 +177,12 @@ const BAND_COLOUR = { LOW: "#0f7b4f", MEDIUM: "#b54708", HIGH: "#b42318" };
 function renderDetail(d) {
   const b = d.booking, s = d.shipper, r = d.risk, q = d.quote;
   const colour = BAND_COLOUR[r.band];
+  const pointsTotal = r.reasons.reduce((a, x) => a + x.points, 0);
+  const capNote = pointsTotal > r.score
+    ? `<p class="muted" style="font-size:12px;margin:6px 0 0">Points add up to ${pointsTotal}; the score is capped at ${r.score === 100 ? "100" : r.score + " because no rule fired (the model alone never flags a booking)"}.</p>`
+    : "";
   const reasons = r.reasons.length
-    ? `<ul class="reasons">${r.reasons.map((x) => `<li class="${x.kind}"><span class="pts">+${x.points}</span><span>${esc(x.text)}</span></li>`).join("")}</ul>`
+    ? `<ul class="reasons">${r.reasons.map((x) => `<li class="${x.kind}"><span class="pts">+${x.points}</span><span>${esc(x.text)}</span></li>`).join("")}</ul>${capNote}`
     : `<p class="muted">No rule fired and nothing unusual about this booking.</p>`;
   const routing = r.band === "HIGH"
     ? (b.status === "in_review" ? "Sent to the manual review queue. Not rejected." : `Reviewed: ${STATUS[b.status] || b.status}.`)
@@ -285,12 +291,13 @@ function bindCover(d) {
     issue.addEventListener("click", async () => {
       issue.disabled = true;
       try {
-        await api("/api/policies", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ booking_id: d.booking.id }) });
-        toast("Cover issued. Scan the QR to check it.");
+        const pol = await api("/api/policies", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ booking_id: d.booking.id }) });
         const fresh = await api(`/api/bookings/${d.booking.id}`);
         $("#cover-card").innerHTML = coverHtml(fresh);
         bindCover(fresh);
-        loadStats();
+        await loadStats();
+        // The KPI strip sits under the drawer, so say what changed.
+        toast(`Cover ${pol.policy_no} issued for ${usd(pol.premium_usd, 2)}. Policies issued: ${num(state.stats.policies_issued)}, premium written: ${usd(state.stats.premium_written_usd)}.`, 5000);
         loadBookings();
       } catch (e) { toast(e.message); issue.disabled = false; }
     });
@@ -318,8 +325,11 @@ async function drawGraph(shipperId) {
     $(".legend").hidden = true;
     return;
   } else {
-    summary.innerHTML = `${sm.connected_shippers} connected shipper${sm.connected_shippers === 1 ? "" : "s"} within 2 hops through ${sm.shared_identifiers} shared identifier${sm.shared_identifiers === 1 ? "" : "s"}` +
-      (sm.flagged_shippers ? ` · <b style="color:#b42318">${sm.flagged_shippers} flagged</b>` : ` · none flagged (a shared agent number on its own is not a reason to flag anyone)`);
+    const flaggedText = sm.flagged_connected
+      ? ` · <b style="color:#b42318">${sm.flagged_connected} of them flagged</b>`
+      : " · none of them flagged (a shared agent number on its own is not a reason to flag anyone)";
+    summary.innerHTML = (sm.center_flagged ? `<b style="color:#b42318">This shipper is flagged.</b> ` : "") +
+      `${sm.connected_shippers} connected shipper${sm.connected_shippers === 1 ? "" : "s"} within 2 hops through ${sm.shared_identifiers} shared identifier${sm.shared_identifiers === 1 ? "" : "s"}` + flaggedText;
   }
   const box = $("#graph");
   if (!window.vis || !box) { box.innerHTML = `<p class="muted" style="padding:10px">Graph view unavailable.</p>`; return; }
@@ -415,6 +425,8 @@ async function chatSend(form) {
     const r = await api("/api/chat", { method: "POST", body: form });
     typing.remove();
     addMsg("bot", r.text, { result: r.result });
+    const box = $("#phone").getBoundingClientRect();
+    if (box.bottom > window.innerHeight) $("#phone").scrollIntoView({ behavior: "smooth", block: "end" });
   } catch (e) { typing.remove(); addMsg("bot", "Sorry, something went wrong: " + e.message); }
   loadStats(); loadLog();
 }
@@ -480,8 +492,7 @@ async function runStep(step) {
     showTab("verify");
     await loadDocs();
     $$(".doc").forEach((d) => d.classList.toggle("highlight", d.dataset.name === demo.demo_fake));
-    const el = $(`.doc[data-name="${demo.demo_fake}"]`);
-    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    window.scrollTo({ top: 0, behavior: "smooth" });  // keep the Fakes caught counter in view
     toast("Click the highlighted document to send it into the chat.");
   } else if (step === "2") {
     showTab("bookings");

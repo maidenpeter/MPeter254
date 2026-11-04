@@ -1,17 +1,19 @@
 # Commodity classes used by the generator, the risk engine and the pricing model.
 # All numbers are illustrative demo assumptions, not market data.
 #
-# keywords        words that map a free-text description to this class (checked in file order)
+# keywords        words that map a free-text description to this class (checked in file order).
+#                 A keyword matches a whole word (plurals too); end it with * to match a word start,
+#                 e.g. pharma* matches 'Pharmaceuticals'. So 'cash' does not match 'Cashew nuts'.
 # descriptions    what the generator writes on synthetic bookings
 # density_kg_m3   plausible range for this class (weight / volume)
 # value_per_kg    plausible declared value range in USD per kg
-# weight_kg       plausible chargeable weight range for one booking
+# weight_kg       plausible gross weight range for one booking
 # base_loss_rate  expected loss as a share of sum insured, before the risk multiplier
 
 classes:
   valuables:
     label: Valuables
-    keywords: [gold, precious metal, bank note, banknote, cash, gemstone, jewel, bullion, dore]
+    keywords: [gold, precious metal, bank note, banknote, cash, gemstone, jewel*, bullion, dore]
     descriptions: [Gold bars, Gold dore, Precious metals, Bank notes, Gemstones]
     density_kg_m3: [1200, 6500]
     typical_density: 3000
@@ -35,7 +37,7 @@ classes:
 
   pharma:
     label: Pharmaceuticals
-    keywords: [pharma, vaccine, medic, drug, antiretroviral]
+    keywords: [pharma*, vaccin*, medic*, drug, antiretroviral*]
     descriptions: [Pharmaceuticals, Vaccines (temperature controlled), Medical consumables, Antiretroviral medicines]
     density_kg_m3: [110, 320]
     typical_density: 190
@@ -59,7 +61,7 @@ classes:
 
   perishables:
     label: Perishables
-    keywords: [fresh, chilled, frozen, flower, fish, meat, lamb, fruit, avocado, mango, vegetable, beans, herbs]
+    keywords: [fresh, chilled, frozen, flower, fish, meat, lamb, fruit, avocado, mango, vegetable, bean, herb]
     descriptions: [Fresh cut flowers, Fresh avocados, Chilled fish fillets, Fresh green beans, Fresh mangoes, Chilled lamb carcasses, Fresh herbs]
     density_kg_m3: [130, 450]
     typical_density: 240
@@ -71,7 +73,7 @@ classes:
 
   garments:
     label: Garments
-    keywords: [garment, shirt, jean, uniform, sweater, apparel, textile, clothing]
+    keywords: [garment, t-shirt, shirt, jean, uniform, sweater, apparel, textile, clothing]
     descriptions: [Cotton T-shirts, Ladies garments, Denim jeans, School uniforms, Knitted sweaters]
     density_kg_m3: [90, 260]
     typical_density: 160
@@ -83,7 +85,7 @@ classes:
 
   electronics:
     label: Electronics
-    keywords: [laptop, computer, television, electronic, inverter, network, tablet]
+    keywords: [laptop, computer, television, electronic*, inverter, network, tablet]
     descriptions: [Laptop computers, LED televisions, Computer components, Network equipment, Solar inverters]
     density_kg_m3: [120, 350]
     typical_density: 200
@@ -95,7 +97,7 @@ classes:
 
   machinery_parts:
     label: Machinery parts
-    keywords: [machinery, spare part, pump, engine, mining, parts]
+    keywords: [machinery, spare part, pump, engine, mining, part]
     descriptions: [Machinery spare parts, Pump assemblies, Engine components, Mining equipment parts, Agricultural machinery parts]
     density_kg_m3: [300, 1100]
     typical_density: 520

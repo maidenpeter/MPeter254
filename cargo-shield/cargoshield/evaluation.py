@@ -12,11 +12,18 @@ from typing import Any
 
 
 def engine_report(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Grade the engine on the seeded bookings only. Live-feed and API bookings
+    have no ground truth, so counting them as clean would skew the rates."""
+    from . import db
+
+    last_seeded = db.get_meta(conn, "seed_max_booking_id") or 10**12
     rows = conn.execute(
         """
         SELECT b.id, b.awb, r.band, r.score
         FROM booking b JOIN risk_score r ON r.booking_id = b.id
-        """
+        WHERE b.id <= ?
+        """,
+        (last_seeded,),
     ).fetchall()
     truth: dict[int, list[str]] = defaultdict(list)
     for t in conn.execute("SELECT booking_id, pattern FROM seed_truth"):

@@ -58,12 +58,12 @@ make doctor
 | `make reset` | Put the database back to the demo starting state (issued cover, reviews, chat checks and live bookings are cleared). There is also a Reset button in the UI. |
 | `make test` | Run the test suite (about 15 seconds). |
 | `make report` | Print how many planted risks the engine caught and the false-positive rate on clean bookings. |
-| `make train` | Retrain the model and rescore, e.g. after editing `config/rules.yaml`. |
+| `make train` | After editing `config/rules.yaml`: go back to the demo starting state, retrain, rescore and save that as the new starting state (so Reset keeps your tuning). A running app picks up the new rules and model on its next request. |
 | `make doctor` | Pre-flight check. |
 
 No `make` (e.g. Windows)? Use `python -m cargoshield demo`, `python -m cargoshield reset`, `python -m cargoshield test` and so on.
 
-To let a phone on the same Wi-Fi scan the QR codes, start with `make demo HOST=0.0.0.0` and open the dashboard on the LAN address it prints. By default the app only listens on the laptop itself.
+To let a phone on the same Wi-Fi scan the QR codes, start with `make demo HOST=0.0.0.0` and open the dashboard on the LAN address it prints. By default the app only listens on the laptop itself. Even on the network, other devices can only reach the public `/verify/...` pages; the dashboard and its API answer only the presenter's laptop, and writes from other websites are refused.
 
 ## How it works
 
@@ -80,7 +80,9 @@ data/routes.csv ─► seed.py ─► SQLite ─► risk.py (rules.yaml + Isolat
 
 Bands: LOW 0 to 39, MEDIUM 40 to 69, HIGH 70+. HIGH goes to the review queue.
 
-On the seeded data the engine catches all 120 planted risks and flags about 0.1% of clean bookings as MEDIUM or higher (`make report` prints the live numbers).
+On the seeded data the engine catches all 120 planted risks and flags about 0.1% of clean bookings as MEDIUM or higher (`make report` prints the numbers; it grades only the seeded bookings, since live-feed bookings have no known answer). Model points below 3 are dropped, so the reasons on screen always add up to the score, apart from the cap at 100.
+
+HIGH bookings whose flights left before the seed ran come with a past reviewer decision (approved or rejected, with a note), so the live review queue only holds flights still to go.
 
 **Fraud graph.** Shippers are linked through shared phone numbers, emails and payer account references (`contact_link` table). `GET /graph/shipper/{id}` returns everyone within 2 hops. A shipper is *flagged* if KYC failed, a reviewer rejected one of their bookings, or one of their bookings scores HIGH on its own evidence. Sharing an agent's phone number with other clean shippers is not, on its own, a reason to flag anyone; the demo includes such groups.
 
@@ -94,9 +96,13 @@ gross premium     = expected loss ÷ (1 − expense loading − profit margin)
 premium           = max(gross premium, minimum premium)
 ```
 
-The 26 SDR/kg limit has applied since 28 December 2024 (up from 22). Verify it, and the SDR rate, before any real use. Issuing cover creates a random 192-bit token and a QR code that links to `/verify/policy/{token}`.
+Money is rounded half-up to the cent at each line, and each line is worked from the line above as shown, so every step can be redone on a calculator; the profit line takes the rounding cent. Cover is only offered before the flight departs, and not when the top-up is under $1,000 (`minimum_sum_insured_usd`), where the $25 minimum premium would be a silly rate.
 
-**Verify.** `GET /verify/awb/{awb}` checks the check digit, then looks the number up. `POST /verify/image` reads a QR code if there is one, otherwise OCRs the AWB number (and asks for it if it can't). `GET /verify/policy/{token}` confirms cover is real and active. Answers carry route, flight date, pieces and weight only: never shipper names or contact details, and never a hint that a booking is under review. Every check goes into `verification_log`. Opened in a browser, the verify links show a phone-friendly page; called from code, they return JSON.
+The 26 SDR/kg limit has applied since 28 December 2024 (up from 22). It applies to the actual weight of the packages (Art. 22(4)). Verify it, and the SDR rate, before any real use. Issuing cover creates a random 192-bit token and a QR code that links to `/verify/policy/{token}`.
+
+**Verify.** `GET /verify/awb/{awb}` checks the check digit, then looks the number up. `POST /verify/image` reads any QR code, then OCRs the printed text and cross-checks the two: a QR must point to the CargoShield host (no look-alike sites, no missing scheme, no `user@host` tricks), and a genuine policy QR on a certificate printed with a different AWB comes back SUSPICIOUS. If the photo can't be read it asks for the number (OCR gives up after 12 seconds). `GET /verify/policy/{token}` confirms cover is real and active. Policy numbers are sequential, so checking cover by number needs the AWB too.
+
+Answers carry route, flight date, pieces and weight only: never shipper names or contact details. A booking waiting for a reviewer reads "Booked", exactly like any other, so the internal flag never shows. Only a booking a reviewer rejected reads differently (NOT ACTIVE, with a warning not to pay), which is what the airline would tell anyone who asked. Every check goes into `verification_log`; anything that isn't an AWB is logged as a digit count, never the raw text, so phone numbers people type don't end up in the log. Opened in a browser, the verify links show a phone-friendly page; called from code, they return JSON.
 
 **WhatsApp.** The demo uses a chat simulator in the UI. All message handling sits behind one function, `messaging.handle_message()`. `cargoshield/whatsapp.py` shows the adapter for the WhatsApp Business Cloud API (parse the webhook, build the reply). It is not connected and has not been tested against the live service.
 
@@ -119,15 +125,17 @@ cargo-shield/
 - **Three extra tables**: `review_decision` (approve/hold/reject with a note), `seed_truth` (which planted pattern each risky booking carries; only the tests read it) and `demo_meta`. Bookings also have a `payment_ref` column, because the fraud graph needs payer references and the brief's booking table had nowhere to keep them.
 - **vis-network is bundled** in `cargoshield/static/vendor/` instead of loaded from a CDN, because the demo must work offline.
 - **SUSPICIOUS vs INVALID FORMAT.** A typed number that fails the check digit is INVALID FORMAT (probably a typo). The same number printed on a document is SUSPICIOUS, because the airline could never have issued it.
-- **Verify results for bookings under review** say "Awaiting confirmation", so internal flags never leak to the public.
+- **NOT ACTIVE** is an extra verify result for a booking a reviewer rejected (and for cancelled cover), so a real AWB that will never fly doesn't get a green tick.
 
 ## Known limits (say these out loud if asked)
 
 - **Top-up cover leaves a gap.** It pays the difference between declared value and the carrier's liability limit. But the carrier isn't liable for everything (Article 18 defences such as inherent defect, defective packing by someone else, war, or acts of public authority). An all-risks cargo policy that covers full value and recovers from the carrier is the usual design. Worth deciding before a real product.
 - **Prices are placeholders.** Base loss rates, loadings and multipliers are made up. A real rate needs the airline's claims history.
-- **Public verify endpoints can be scraped.** Anyone can try AWB numbers. A pilot needs rate limiting and probably a lighter answer (e.g. route only) for unauthenticated callers.
+- **Public verify endpoints can be scraped.** Anyone can try AWB numbers (the check digit cuts guessing by 7x, no more). A pilot needs rate limiting and probably a lighter answer (e.g. route only) for unauthenticated callers.
+- **The dashboard has no login.** It is locked to the presenter's laptop, which is fine for a demo and nothing more.
 - **OCR on real phone photos** is weaker than on these clean renders. Glare, folds and handwriting will cause misses; the chat falls back to asking for the number.
-- **Times** are stored as naive timestamps and route departure times are placeholders.
+- **Times** are stored as UTC and shown in the browser's local time; route departure times are placeholders. If the schedule has no flight in the next 11 hours when you seed, the HIGH demo booking gets a departure 6 hours out on a route that flies that day, which may not match the timetable.
+- **Small seeds.** Below about 1,000 bookings the planted share runs a little over 5%, so every pattern still appears at least twice.
 - **SQLite** is fine for a demo. The schema is written to move to Postgres; the queries use plain SQL.
 
 ## Data protection notes

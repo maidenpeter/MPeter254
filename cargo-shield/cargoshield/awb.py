@@ -11,8 +11,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# 3 digits, optional separator, 8 digits (often printed as 4 + 4).
-_AWB_RE = re.compile(r"(?<!\d)(\d{3})\s*[-–.\s]?\s*(\d{4})\s*[-.\s]?\s*(\d{4})(?!\d)")
+# 3 digits, optional separator, 8 digits. The 8 are usually printed 4 + 4, but
+# people and OCR split them anywhere ("2429 6742", "24296 742"), so allow up to
+# two single spaces or dots inside the serial.
+_AWB_RE = re.compile(r"(?<![0-9])([0-9]{3})[ \t]*[-–.]?[ \t]*((?:[0-9][ .]?){7}[0-9])(?![0-9])")
 
 # Characters OCR commonly confuses with digits inside a number.
 _OCR_FIX = str.maketrans({"O": "0", "o": "0", "D": "0", "Q": "0", "I": "1", "l": "1", "|": "1",
@@ -60,7 +62,8 @@ class AwbCheck:
 def normalise(text: str) -> str | None:
     """Return 11 digits if the text is exactly one AWB-shaped number, else None."""
     digits = re.sub(r"[\s\-–.]", "", text or "")
-    return digits if len(digits) == 11 and digits.isdigit() else None
+    # ASCII only: Python's isdigit() also accepts superscripts and other scripts' digits.
+    return digits if len(digits) == 11 and digits.isascii() and digits.isdigit() else None
 
 
 def validate(text: str) -> AwbCheck:
@@ -88,7 +91,10 @@ def find_in_text(text: str, fix_ocr: bool = False) -> list[str]:
         sources.append(fixed)
     for src in sources:
         for m in _AWB_RE.finditer(src):
-            awb = "".join(m.groups())
+            serial = m.group(2)
+            if sum(not ch.isdigit() for ch in serial) > 2:
+                continue  # "1 2 3 4 5 6 7 8" is not how anyone writes an AWB
+            awb = m.group(1) + re.sub(r"[ .]", "", serial)
             if awb not in candidates:
                 candidates.append(awb)
     return candidates

@@ -5,14 +5,16 @@ from __future__ import annotations
 import re
 import secrets
 import sqlite3
+from datetime import timedelta
+from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
 
 from . import awb as awbmod
 from . import db, documents, pricing, risk
 
 _POLICY_NO_RE = re.compile(r"\bCSP[-\s]?(\d{5,8})\b", re.IGNORECASE)
-_TOKEN_PATH_RE = re.compile(r"/verify/policy/([A-Za-z0-9_\-]{16,64})")
+_LINK_RE = re.compile(r"(?P<prefix>\S*?)/verify/(?P<kind>policy|awb)/(?P<value>[A-Za-z0-9_\-]{6,64})")
+_AUTHORITY_RE = re.compile(r"[A-Za-z0-9.\-]+(:[0-9]{1,5})?")
 
 
 class CoverError(Exception):
@@ -32,13 +34,37 @@ def verify_url(base_url: str, token: str) -> str:
     return f"{base_url.rstrip('/')}/verify/policy/{token}"
 
 
-def token_from_url(text: str) -> tuple[str | None, str | None]:
-    """(token, host) if the text holds a CargoShield policy verification link."""
-    m = _TOKEN_PATH_RE.search(text or "")
+def find_link(text: str) -> "VerifyLink | None":
+    """Find a CargoShield verification link (/verify/policy/... or /verify/awb/...) in text.
+
+    The host is read strictly. Anything that could make a browser go somewhere
+    other than the host we read (userinfo '@', backslashes, odd characters, a
+    missing scheme) marks the link as not well formed, and callers treat that as
+    untrusted.
+    """
+    m = _LINK_RE.search(text or "")
     if not m:
-        return None, None
-    host = urlparse(text.strip()).hostname if "://" in (text or "") else None
-    return m.group(1), host
+        return None
+    prefix = m.group("prefix") or ""
+    scheme_m = re.match(r"^(https?)://", prefix, re.IGNORECASE)
+    if not scheme_m:
+        return VerifyLink(m.group("kind"), m.group("value"), None, well_formed=False, has_prefix=bool(prefix))
+    authority = prefix[scheme_m.end():]
+    ok = bool(authority) and bool(_AUTHORITY_RE.fullmatch(authority))
+    host = authority.rsplit(":", 1)[0].lower() if ok else (authority or None)
+    return VerifyLink(m.group("kind"), m.group("value"), host, well_formed=ok, has_prefix=True)
+
+
+@dataclass(frozen=True)
+class VerifyLink:
+    kind: str  # "policy" | "awb"
+    value: str
+    host: str | None
+    well_formed: bool
+    has_prefix: bool
+
+    def trusted(self, hosts: set[str]) -> bool:
+        return self.well_formed and self.host is not None and self.host in hosts
 
 
 def to_dict(row: sqlite3.Row | dict[str, Any], base_url: str | None = None) -> dict[str, Any]:
@@ -81,6 +107,12 @@ def quote_booking(conn: sqlite3.Connection, booking_id: int) -> pricing.Quote:
     if q.eligible and b["status"] in ("on_hold", "rejected"):
         q.eligible = False
         q.reason = f"The booking is {b['status'].replace('_', ' ')} after review, so cover is not offered."
+    departure = db.parse_dt(b["booked_at"]) + timedelta(hours=b["lead_time_hours"])
+    if q.eligible and departure <= db.utcnow():
+        # Cover has to be bought before the risk starts (no insuring a known outcome).
+        q.eligible = False
+        q.reason = (f"This flight left on {departure:%d %b %Y}. Cover has to be bought before departure, "
+                    "so it is no longer offered.")
     return q
 
 

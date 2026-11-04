@@ -18,7 +18,8 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 os.environ.setdefault("OMP_THREAD_LIMIT", "1")
 OCR_TIMEOUT_S = 12  # give up and ask for the number rather than freeze the chat
 
-Image.MAX_IMAGE_PIXELS = 40_000_000  # refuse absurdly large images
+Image.MAX_IMAGE_PIXELS = 40_000_000
+MAX_PIXELS = 25_000_000  # a 50-megapixel phone photo is far more than OCR needs
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 
 
@@ -53,9 +54,13 @@ def load_image(data: bytes) -> Image.Image:
     if len(data) > MAX_UPLOAD_BYTES:
         raise BadImage("image is larger than 8 MB")
     try:
-        img = Image.open(io.BytesIO(data))
+        img = Image.open(io.BytesIO(data))  # reads the header only
+        if img.width * img.height > MAX_PIXELS:
+            raise BadImage(f"image is {img.width}x{img.height} pixels; please send a smaller photo")
         img.load()
-    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
+    except BadImage:
+        raise
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as e:
         raise BadImage(f"not a readable image ({e.__class__.__name__})") from e
     img = ImageOps.exif_transpose(img)  # phone photos carry their rotation in EXIF
     return img.convert("RGB")
@@ -74,6 +79,9 @@ def read_qr(img: Image.Image) -> list[str]:
 
 def _prep(img: Image.Image) -> Image.Image:
     g = img.convert("L")
+    if g.width > 3000:  # big phone photos: shrink first, OCR time grows with pixels
+        scale = 3000 / g.width
+        g = g.resize((3000, int(g.height * scale)), Image.LANCZOS)
     if g.width < 1400:
         scale = 1400 / g.width
         g = g.resize((int(g.width * scale), int(g.height * scale)), Image.LANCZOS)

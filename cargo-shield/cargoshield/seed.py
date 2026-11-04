@@ -377,6 +377,38 @@ class Generator:
         return self.booking(shipper, cls, text, route, phys, self.clean_payment(shipper), booked, dep)
 
 
+def pick_hero_flight(g: Generator) -> tuple[Route, datetime, datetime]:
+    """Flight for the demo's HIGH booking: (route, departure, booked_at).
+
+    The story is "caught before the plane left", so the flight must still be in
+    the future, booked a few hours out (under the 12-hour rule), and never booked
+    in the future. Prefer the next scheduled departure within 11 hours, ideally
+    Nairobi to Hong Kong or Johannesburg. If the schedule has nothing that soon
+    (e.g. a quiet Saturday afternoon), use a route that flies today and set the
+    departure 6 hours out; only the departure time is then off-schedule, which
+    nothing on screen shows.
+    """
+    soonest = g.anchor + timedelta(hours=1)
+    latest = g.anchor + timedelta(hours=11)
+    candidates = [(r.next_departure(soonest), r) for r in g.routes]
+    candidates = [(d, r) for d, r in candidates if d <= latest]
+    if candidates:
+        def preference(c):
+            d, r = c
+            return (r.origin != "NBO", r.destination not in ("HKG", "JNB"), abs((d - g.anchor).total_seconds() / 3600 - 5))
+        dep, route = min(candidates, key=preference)
+        booked = min(dep - timedelta(hours=7), g.anchor - timedelta(minutes=30))
+        return route, dep, booked
+    dep = g.anchor + timedelta(hours=6)
+    flying = [r for r in g.routes if dep.weekday() in r.days]
+    if flying:
+        route = next((r for r in flying if r.origin == "NBO"), flying[0])
+        return route, dep, dep - timedelta(hours=7)
+    route = g.routes[0]  # degenerate schedule: take the next departure whatever it is
+    dep = route.next_departure(soonest)
+    return route, dep, g.anchor - timedelta(minutes=30)
+
+
 def _insert(conn, table: str, row: dict[str, Any]) -> int:
     cols = [k for k in row if not k.startswith("_")]
     cur = conn.execute(
@@ -394,28 +426,12 @@ def generate(conn, n_bookings: int, n_shippers: int, seed: int, planted_fraction
     shippers: list[dict] = []
     bookings: list[dict] = []
 
-    n_planted = max(10, round(n_bookings * planted_fraction))
+    # The ring (12 bookings) plus at least two of each other pattern means seeds
+    # under about 1,000 bookings plant a little more than 5%.
+    n_planted = max(20, round(n_bookings * planted_fraction))
 
     # ---------------- planted fraud ring (pattern 5) ----------------
-    # The hero HIGH booking should be on a flight that has not left yet, so the
-    # demo can say "caught before the plane left". Use the next Nairobi
-    # departure within ~10 hours if there is one; otherwise the latest past one.
-    upcoming = sorted(
-        (r.next_departure(g.anchor + timedelta(hours=2)), r)
-        for r in g.routes_by_origin["NBO"]
-    )
-    upcoming = [(d, r) for d, r in upcoming if d <= g.anchor + timedelta(hours=10)]
-    if upcoming:
-        prefer = [(d, r) for d, r in upcoming if r.destination in ("HKG", "JNB")]
-        hero_dep, hero_route = (prefer or upcoming)[0]
-        hero_booked = min(hero_dep - timedelta(hours=7), g.anchor - timedelta(minutes=50))
-    else:
-        hero_route = next(r for r in g.routes if r.key == "NBO-HKG")
-        hero_dep = hero_route.prev_departure(g.anchor + timedelta(hours=6))
-        hero_booked = hero_dep - timedelta(hours=7)
-        if hero_booked > g.anchor - timedelta(minutes=30):
-            hero_dep = hero_route.prev_departure(hero_dep - timedelta(hours=1))
-            hero_booked = hero_dep - timedelta(hours=7)
+    hero_route, hero_dep, hero_booked = pick_hero_flight(g)
 
     r1 = g.make_shipper("KE", "valuables", hero_booked - timedelta(days=12, hours=5), "pending", planted=True, personal_email=True)
     r2 = g.make_shipper("KE", "general_cargo", g.anchor - timedelta(days=730), "verified", planted=True)
@@ -584,7 +600,8 @@ def generate(conn, n_bookings: int, n_shippers: int, seed: int, planted_fraction
     activity = [rng.lognormvariate(0, 1.0) * (0.35 if s["_new"] else 1.0) for s in clean_shippers]
     n_clean = max(n_bookings - len(bookings), 0)
 
-    lun = next(r for r in g.routes if r.key == "NBO-LUN")
+    lun = (next((r for r in g.routes if r.key == "NBO-LUN"), None)
+           or next((r for r in g.routes if r.origin == "NBO"), None) or g.routes[0])
     dep = lun.next_departure(g.anchor + timedelta(days=2))
     clean_hero = g.booking(hero_shipper, "pharma", "Pharmaceuticals", lun,
                            {"commodity_class": "pharma", "weight_kg": 420.0, "volume_m3": 2.1, "pieces": 21,
@@ -647,16 +664,55 @@ def seed_history(conn, summary: dict[str, Any], seed: int, policy_share: float, 
     for row in rows:
         if db.parse_dt(row["booked_at"]) > anchor - timedelta(days=1) or rng.random() > policy_share:
             continue
-        q = pricing.quote_for_row(row, row["band"])
+        q = pricing.quote_for_row(row, row["band"])  # priced as at booking time, before departure
         if not q.eligible:
             continue
-        issued_at = db.parse_dt(row["booked_at"]) + timedelta(minutes=rng.uniform(5, 360))
+        booked = db.parse_dt(row["booked_at"])
+        departure = booked + timedelta(hours=row["lead_time_hours"])
+        issued_at = min(booked + timedelta(minutes=rng.uniform(5, 360)), departure - timedelta(minutes=20))
+        if issued_at <= booked:
+            continue
         conn.execute(
             "INSERT INTO policy (booking_id, sum_insured_usd, premium_usd, status, qr_token, issued_at) "
             "VALUES (?, ?, ?, 'active', ?, ?)",
             (row["id"], q.sum_insured_usd, q.premium_usd, secrets.token_urlsafe(16), db.iso(issued_at)),
         )
         issued += 1
+
+    # Past review decisions: HIGH bookings whose flights have already gone were
+    # decided by a person at the time, so the live queue only holds current work.
+    # (The seed knows which bookings it planted; the reviewers' calls follow that.)
+    reject_notes = [
+        "Shipper could not show proof of ownership for the goods. Not accepted.",
+        "Contact details match a watchlisted shipper. Not accepted.",
+        "Contents did not match the declaration at acceptance. Refused.",
+        "Payer refused to identify themselves. Booking cancelled.",
+    ]
+    approve_notes = [
+        "Called the shipper and checked the invoice. Fine to fly.",
+        "New account, documents verified in person. Approved.",
+    ]
+    past_high = conn.execute(
+        """
+        SELECT b.id, b.booked_at, b.lead_time_hours,
+               EXISTS (SELECT 1 FROM seed_truth t WHERE t.booking_id = b.id) AS planted
+        FROM booking b JOIN risk_score r ON r.booking_id = b.id
+        WHERE b.status = 'in_review'
+        """
+    ).fetchall()
+    for row in past_high:
+        booked = db.parse_dt(row["booked_at"])
+        departure = booked + timedelta(hours=row["lead_time_hours"])
+        if departure > anchor:
+            continue  # still to fly: stays in the live review queue
+        decided = booked + timedelta(hours=min(row["lead_time_hours"] * rng.uniform(0.2, 0.7), 6))
+        decision, note = (("reject", rng.choice(reject_notes)) if row["planted"]
+                          else ("approve", rng.choice(approve_notes)))
+        conn.execute(
+            "INSERT INTO review_decision (booking_id, decision, note, decided_by, decided_at) VALUES (?, ?, ?, ?, ?)",
+            (row["id"], decision, note, "Cargo security desk", db.iso(decided)))
+        conn.execute("UPDATE booking SET status = ? WHERE id = ?",
+                     ("rejected" if decision == "reject" else "accepted", row["id"]))
 
     awbs = [r["awb"] for r in conn.execute("SELECT awb FROM booking").fetchall()]
     prefix = config.awb_prefix()
@@ -748,11 +804,18 @@ def run(n_bookings: int | None = None, n_shippers: int | None = None, seed: int 
         model = anomaly.train(conn)
         anomaly.save(model)
         risk.score_all(conn, model)
-        summary["engine"] = evaluation.engine_report(conn)
         seed_history(conn, summary, seed, cfg["history_policy_share"], cfg["history_verifications"])
+        # Past reviewer rejections are facts the graph uses, so score once more with
+        # them in place. This is exactly what `make train` reproduces later.
+        risk.score_all(conn, model)
         summary["samples"] = write_samples(conn, summary)
 
     db.set_meta(conn, "seeded_at", db.iso(db.utcnow()))
+    db.set_meta(conn, "seed_max_booking_id",
+                conn.execute("SELECT MAX(id) FROM booking").fetchone()[0])
+    if score:
+        from . import evaluation
+        summary["engine"] = evaluation.engine_report(conn)
     db.set_meta(conn, "demo", {
         "hero_high_booking_id": summary["hero_high_booking_id"],
         "hero_high_awb": summary["hero_high_awb"],

@@ -48,6 +48,8 @@ cover:
   expense_loading: 0.25
   profit_margin: 0.10
   minimum_premium_usd: 25.0
+  # Below this top-up the floor premium would be a silly rate on the amount covered.
+  minimum_sum_insured_usd: 1000.0
   # Multiplier applied to the base loss rate, by risk band.
   # HIGH is never offered cover; it goes to manual review.
   risk_multiplier:

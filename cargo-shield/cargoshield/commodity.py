@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 from . import config
@@ -21,13 +22,21 @@ def is_vague(text: str) -> bool:
     return any(t == p or t.startswith(p) for p in vague_phrases())
 
 
+def _keyword_re(keyword: str) -> re.Pattern[str]:
+    """Whole word (or phrase), plural allowed; a trailing * means 'word starting with'."""
+    k = keyword.lower().strip()
+    if k.endswith("*"):
+        return re.compile(r"\b" + re.escape(k[:-1]))
+    return re.compile(r"\b" + re.escape(k) + r"(?:s|es)?\b")
+
+
 def classify(text: str) -> str:
     """Pick a class from the description. Vague text falls through to general cargo."""
     t = (text or "").lower()
     if is_vague(t):
         return config.commodities()["vague"]["class"]
     for name, spec in classes().items():
-        if any(k in t for k in spec.get("keywords") or []):
+        if any(_keyword_re(k).search(t) for k in spec.get("keywords") or []):
             return name
     return "general_cargo"
 

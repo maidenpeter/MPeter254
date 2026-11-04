@@ -55,11 +55,49 @@ def test_flagged_bookings_have_plain_english_reasons(conn):
 
 
 def test_bands_and_routing(conn):
-    for r in conn.execute("SELECT r.score, r.band, b.status FROM risk_score r JOIN booking b ON b.id = r.booking_id"):
+    rows = conn.execute(
+        "SELECT r.score, r.band, b.status, (SELECT decision FROM review_decision d WHERE d.booking_id = b.id "
+        "ORDER BY d.id DESC LIMIT 1) AS decision FROM risk_score r JOIN booking b ON b.id = r.booking_id"
+    ).fetchall()
+    for r in rows:
         assert r["band"] == risk.band_for(r["score"])
-        assert r["status"] == ("in_review" if r["band"] == "HIGH" else "accepted")
-    # Nothing is auto-rejected.
-    assert conn.execute("SELECT COUNT(*) FROM booking WHERE status = 'rejected'").fetchone()[0] == 0
+        if r["decision"] is None:
+            assert r["status"] == ("in_review" if r["band"] == "HIGH" else "accepted")
+        else:  # a person decided (seeded history covers HIGH bookings whose flights have gone)
+            assert r["band"] == "HIGH"
+            assert r["status"] == {"approve": "accepted", "hold": "on_hold", "reject": "rejected"}[r["decision"]]
+    # Nothing is auto-rejected: every rejected booking has a person's decision behind it.
+    orphan = conn.execute(
+        "SELECT COUNT(*) FROM booking b WHERE b.status = 'rejected' AND NOT EXISTS "
+        "(SELECT 1 FROM review_decision d WHERE d.booking_id = b.id AND d.decision = 'reject')"
+    ).fetchone()[0]
+    assert orphan == 0
+
+
+def test_live_review_queue_holds_only_flights_still_to_go(conn):
+    seeded_at = conn.execute("SELECT value FROM demo_meta WHERE key = 'seeded_at'").fetchone()[0].strip('"')
+    from datetime import datetime, timedelta
+
+    for r in conn.execute("SELECT booked_at, lead_time_hours FROM booking WHERE status = 'in_review'"):
+        departure = datetime.fromisoformat(r["booked_at"]) + timedelta(hours=r["lead_time_hours"])
+        assert departure > datetime.fromisoformat(seeded_at) - timedelta(minutes=5)
+
+
+def test_reasons_add_up_to_the_score(conn):
+    for r in conn.execute("SELECT score, reasons_json, rule_hits_json FROM risk_score"):
+        shown = sum(x["points"] for x in json.loads(r["reasons_json"]))
+        counted = sum(h["points"] for h in json.loads(r["rule_hits_json"]))
+        assert shown == counted
+        assert r["score"] == min(shown, 100) or (r["score"] == 39 and not any(
+            x["kind"] == "rule" for x in json.loads(r["reasons_json"])))
+
+
+def test_rescoring_is_stable(conn, model):
+    """Scoring again gives the same answer (no feedback from stored scores)."""
+    before = {r[0]: r[1] for r in conn.execute("SELECT booking_id, score FROM risk_score")}
+    risk.score_all(conn, model)
+    after = {r[0]: r[1] for r in conn.execute("SELECT booking_id, score FROM risk_score")}
+    assert before == after
 
 
 def test_anomaly_model_alone_never_flags():

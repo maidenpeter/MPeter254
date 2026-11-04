@@ -27,7 +27,7 @@ ICONS = {
 }
 
 _GREETING = re.compile(r"^\s*(hi|hello|hey|help|start|menu|habari|jambo|\?)\W*$", re.IGNORECASE)
-_LONG_DIGITS = re.compile(r"\d[\d\s\-–.]{6,}\d")
+_LONG_DIGITS = re.compile(r"[0-9][0-9\s\-–.]{6,}[0-9]")
 
 
 @dataclass
@@ -61,6 +61,8 @@ def help_text() -> str:
 
 
 def _format(res: verify.VerifyResult) -> OutgoingMessage:
+    if res.result == verify.UNREADABLE:  # a question back to the person, not a verdict
+        return OutgoingMessage(res.message, res.result, res.kind, res.details)
     icon = ICONS.get(res.result, "")
     head = f"{icon} {res.result}".strip()
     lines = [head, res.message]
@@ -82,15 +84,22 @@ def handle_message(conn: sqlite3.Connection, msg: IncomingMessage,
     if not text or _GREETING.match(text):
         return OutgoingMessage(help_text())
 
-    token, _host = policies.token_from_url(text)
-    if token:
-        return _format(verify.verify_policy(conn, token, channel=msg.channel, input_type="link"))
+    link = policies.find_link(text)
+    if link is not None:
+        if link.has_prefix and not link.trusted(verify._trusted(trusted_hosts)):
+            res = verify._foreign_link(link.host, link.kind)
+            verify._log(conn, msg.channel, "link", res.input_value, res.result)
+            return _format(res)
+        if link.kind == "policy":
+            return _format(verify.verify_policy(conn, link.value, channel=msg.channel, input_type="link"))
+        return _format(verify.verify_awb(conn, link.value, channel=msg.channel, input_type="link"))
 
     pid = policies.parse_policy_no(text)
     if pid is not None:
         numbers = awbmod.find_in_text(text)
         res = verify.check_policy_number(conn, pid, numbers[0] if numbers else None)
-        verify._log(conn, msg.channel, "text", res.input_value, res.result)
+        if res.result != verify.UNREADABLE:
+            verify._log(conn, msg.channel, "text", res.input_value, res.result)
         return _format(res)
 
     numbers = awbmod.find_in_text(text)

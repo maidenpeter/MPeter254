@@ -84,8 +84,9 @@ def test_issued_certificate_qr_scans_genuine(conn):
     png = policies.certificate_png(conn, p["id"], "http://localhost:8000")
     res = verify.verify_image(conn, png, trusted_hosts={"localhost"})
     assert res.result == verify.GENUINE and res.kind == "policy"
-    # Same QR, but checked by a service that does not trust localhost: the link points elsewhere.
-    assert verify.check_image(conn, png, trusted_hosts={"cargoshield.example"}).result == verify.SUSPICIOUS
+    # A certificate whose QR points at some other host is a look-alike, whatever token it carries.
+    fake = policies.certificate_png(conn, p["id"], "http://cargoshield-verify.example")
+    assert verify.check_image(conn, fake, trusted_hosts={"localhost"}).result == verify.SUSPICIOUS
 
 
 def test_unreadable_image_asks_for_the_number(conn):

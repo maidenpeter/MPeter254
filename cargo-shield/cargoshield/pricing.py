@@ -3,22 +3,40 @@
 Priced from the same risk score the engine produces. Only LOW and MEDIUM
 bookings get an offer; HIGH goes to manual review first.
 
-    carrier liability  = chargeable weight x liability limit (SDR/kg) x SDR->USD
+    carrier liability  = gross weight x liability limit (SDR/kg) x SDR->USD
     sum insured        = declared value - carrier liability
     expected loss      = sum insured x base loss rate (commodity) x risk multiplier (band)
     gross premium      = expected loss / (1 - expense loading - profit margin)
+    expense loading    = gross premium x expense share
+    profit margin      = gross premium - expected loss - expense loading
     premium            = max(gross premium, minimum premium)
 
-The loadings are expressed as shares of the gross premium, the usual way to
-build a premium from a pure risk cost. All rates are illustrative.
+Money is rounded half-up to the cent at each displayed line, and each line is
+computed from the line above as displayed, so an actuary can redo every step
+with a calculator and the lines add up exactly. The profit line absorbs the
+rounding cent. All rates are illustrative.
+
+The Montreal Convention limit (Art. 22(3)) applies per kg of the actual weight
+of the packages concerned (Art. 22(4)), which is what is used here.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Mapping
 
 from . import commodity, config
+
+CENT = Decimal("0.01")
+
+
+def _d(x: Any) -> Decimal:
+    return x if isinstance(x, Decimal) else Decimal(str(x))
+
+
+def _money(x: Any) -> Decimal:
+    return _d(x).quantize(CENT, rounding=ROUND_HALF_UP)
 
 
 @dataclass
@@ -53,8 +71,8 @@ class Quote:
         return asdict(self)
 
 
-def _usd(x: float) -> str:
-    return f"${x:,.2f}"
+def _usd(x: Any) -> str:
+    return f"${_d(x):,.2f}"
 
 
 def quote(declared_value_usd: float, weight_kg: float, commodity_class: str, band: str) -> Quote:
@@ -64,65 +82,82 @@ def quote(declared_value_usd: float, weight_kg: float, commodity_class: str, ban
               currency=c.get("currency", "USD"), disclaimer=c.get("disclaimer", ""))
 
     multipliers = c["risk_multiplier"]
-    if band not in multipliers:
+    if band == "HIGH" or band not in multipliers:
         q.reason = ("Cover is only offered on LOW and MEDIUM risk bookings. HIGH risk bookings go to a "
                     "person in the review queue instead.") if band == "HIGH" else f"No cover for band {band}."
         return q
 
-    q.liability_sdr_per_kg = float(c["carrier_liability_sdr_per_kg"])
-    q.sdr_to_usd = float(c["sdr_to_usd"])
-    q.carrier_liability_usd = round(q.weight_kg * q.liability_sdr_per_kg * q.sdr_to_usd, 2)
-    q.sum_insured_usd = round(max(q.declared_value_usd - q.carrier_liability_usd, 0.0), 2)
-    if q.sum_insured_usd <= 0:
-        q.reason = (f"The carrier's liability ({_usd(q.carrier_liability_usd)}) already covers the declared "
-                    f"value ({_usd(q.declared_value_usd)}). No top-up needed.")
+    declared = _money(declared_value_usd)
+    weight = _d(weight_kg)
+    sdr_per_kg = _d(c["carrier_liability_sdr_per_kg"])
+    sdr_usd = _d(c["sdr_to_usd"])
+    liability = _money(weight * sdr_per_kg * sdr_usd)
+    sum_insured = max(declared - liability, Decimal("0.00"))
+
+    q.liability_sdr_per_kg = float(sdr_per_kg)
+    q.sdr_to_usd = float(sdr_usd)
+    q.carrier_liability_usd = float(liability)
+    q.sum_insured_usd = float(sum_insured)
+    if sum_insured <= 0:
+        q.reason = (f"The carrier's liability ({_usd(liability)}) already covers the declared "
+                    f"value ({_usd(declared)}). No top-up needed.")
+        return q
+    min_si = _d(c.get("minimum_sum_insured_usd", 0))
+    if sum_insured < min_si:
+        q.reason = (f"The top-up would be only {_usd(sum_insured)} after the carrier's liability of "
+                    f"{_usd(liability)}, below the {_usd(min_si)} minimum worth insuring.")
         return q
 
-    q.base_loss_rate = float(commodity.info(commodity_class)["base_loss_rate"])
-    q.risk_multiplier = float(multipliers[band])
-    q.expected_loss_usd = q.sum_insured_usd * q.base_loss_rate * q.risk_multiplier
-    q.expense_loading = float(c["expense_loading"])
-    q.profit_margin = float(c["profit_margin"])
-    loading_share = q.expense_loading + q.profit_margin
-    if loading_share >= 1:
+    rate = _d(commodity.info(commodity_class)["base_loss_rate"])
+    mult = _d(multipliers[band])
+    expense_share = _d(c["expense_loading"])
+    profit_share = _d(c["profit_margin"])
+    if expense_share + profit_share >= 1:
         raise ValueError("expense_loading + profit_margin must be below 1")
-    q.gross_premium_usd = q.expected_loss_usd / (1 - loading_share)
-    q.expense_usd = q.gross_premium_usd * q.expense_loading
-    q.profit_usd = q.gross_premium_usd * q.profit_margin
-    q.minimum_premium_usd = float(c["minimum_premium_usd"])
-    q.floor_applied = q.gross_premium_usd < q.minimum_premium_usd
-    premium = max(q.gross_premium_usd, q.minimum_premium_usd)
 
-    # Round money only at the end so the steps add up.
-    q.expected_loss_usd = round(q.expected_loss_usd, 2)
-    q.gross_premium_usd = round(q.gross_premium_usd, 2)
-    q.expense_usd = round(q.expense_usd, 2)
-    q.profit_usd = round(q.profit_usd, 2)
-    q.premium_usd = round(premium, 2)
-    q.rate_on_sum_insured = round(q.premium_usd / q.sum_insured_usd, 6)
+    expected_loss = _money(sum_insured * rate * mult)
+    gross = _money(expected_loss / (1 - expense_share - profit_share))
+    expense = _money(gross * expense_share)
+    profit = gross - expected_loss - expense  # balancing line: absorbs the rounding cent
+    minimum = _money(c["minimum_premium_usd"])
+    premium = max(gross, minimum)
+
+    q.base_loss_rate = float(rate)
+    q.risk_multiplier = float(mult)
+    q.expense_loading = float(expense_share)
+    q.profit_margin = float(profit_share)
+    q.expected_loss_usd = float(expected_loss)
+    q.gross_premium_usd = float(gross)
+    q.expense_usd = float(expense)
+    q.profit_usd = float(profit)
+    q.minimum_premium_usd = float(minimum)
+    q.floor_applied = gross < minimum
+    q.premium_usd = float(premium)
+    q.rate_on_sum_insured = float((premium / sum_insured).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP))
     q.eligible = True
 
     label = commodity.label(commodity_class)
+    weight_txt = f"{weight.normalize():f}" if weight == weight.to_integral() else f"{weight:f}".rstrip("0")
     q.steps = [
-        {"label": "Declared value", "formula": "from the booking", "value": q.declared_value_usd},
+        {"label": "Declared value", "formula": "from the booking", "value": float(declared)},
         {"label": "Carrier liability",
-         "formula": f"{q.weight_kg:,.1f} kg x {q.liability_sdr_per_kg:g} SDR/kg x {q.sdr_to_usd:g} USD/SDR",
-         "value": q.carrier_liability_usd},
-        {"label": "Sum insured (top-up)", "formula": "declared value - carrier liability", "value": q.sum_insured_usd},
+         "formula": f"{weight_txt} kg x {sdr_per_kg.normalize():f} SDR/kg x {sdr_usd.normalize():f} USD/SDR",
+         "value": float(liability)},
+        {"label": "Sum insured (top-up)", "formula": "declared value - carrier liability", "value": float(sum_insured)},
         {"label": "Expected loss",
-         "formula": f"sum insured x {q.base_loss_rate:.2%} base rate ({label}) x {q.risk_multiplier:g} ({band} band)",
-         "value": q.expected_loss_usd},
+         "formula": f"sum insured x {rate * 100:.2f}% base rate ({label}) x {mult.normalize():f} ({band} band)",
+         "value": float(expected_loss)},
         {"label": "Expense loading",
-         "formula": f"{q.expense_loading:.0%} of gross premium", "value": q.expense_usd},
+         "formula": f"{expense_share * 100:.0f}% of gross premium", "value": float(expense)},
         {"label": "Profit margin",
-         "formula": f"{q.profit_margin:.0%} of gross premium", "value": q.profit_usd},
+         "formula": f"{profit_share * 100:.0f}% of gross premium (takes the rounding cent)", "value": float(profit)},
         {"label": "Gross premium",
-         "formula": f"expected loss / (1 - {q.expense_loading:.2f} - {q.profit_margin:.2f})",
-         "value": q.gross_premium_usd},
+         "formula": f"expected loss / (1 - {expense_share:.2f} - {profit_share:.2f})",
+         "value": float(gross)},
         {"label": "Premium payable",
-         "formula": (f"minimum premium floor of {_usd(q.minimum_premium_usd)} applied" if q.floor_applied
-                     else f"gross premium (above the {_usd(q.minimum_premium_usd)} floor)"),
-         "value": q.premium_usd},
+         "formula": (f"minimum premium floor of {_usd(minimum)} applied" if q.floor_applied
+                     else f"gross premium (above the {_usd(minimum)} floor)"),
+         "value": float(premium)},
     ]
     return q
 
