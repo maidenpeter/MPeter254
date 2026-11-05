@@ -1,4 +1,8 @@
+ifeq ($(OS),Windows_NT)
+PYTHON ?= python
+else
 PYTHON ?= python3
+endif
 HOST ?= 127.0.0.1
 PORT ?= 8000
 

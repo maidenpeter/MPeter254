@@ -26,6 +26,11 @@ html, body { margin: 0; }
 body { font: 14px/1.45 var(--font); color: var(--ink); background: var(--bg); -webkit-font-smoothing: antialiased; }
 button { font: inherit; color: inherit; }
 [hidden] { display: none !important; }
+:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+h1.brand-name { margin: 0; line-height: 1.2; }
+.awb-link { border: 0; background: none; padding: 0; font-family: var(--mono); font-size: 13px; color: var(--ink); cursor: pointer; white-space: nowrap; }
+.awb-link:hover { color: var(--brand); text-decoration: underline; }
+h2.d-awb { margin: 0; }
 
 /* top bar */
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 28px;
@@ -206,10 +211,12 @@ table { border-collapse: collapse; width: 100%; }
 .msg.bot.NOT_FOUND { border-left: 4px solid var(--high); }
 .msg.bot.SUSPICIOUS, .msg.bot.NOT_ACTIVE { border-left: 4px solid var(--med); }
 .msg img { display: block; max-width: 220px; border-radius: 6px; margin-bottom: 4px; }
-.msg .time { display: block; text-align: right; font-size: 10.5px; color: #667085; margin-top: 2px; }
+.msg .time { display: block; text-align: right; font-size: 10.5px; color: #5b6474; margin-top: 2px; }
+.msg.me .time { color: #475467; }
 .msg.typing { color: var(--muted); font-style: italic; }
 .composer { display: flex; gap: 8px; align-items: center; background: #f0f0f0; padding: 8px; border-radius: 0 0 24px 24px; }
 .composer input[type=text] { flex: 1; border: 0; border-radius: 20px; padding: 10px 14px; font: inherit; outline: none; background: #fff; }
+.composer input[type=text]:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
 .attach, .send { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; cursor: pointer; flex: none; border: 0; }
 .attach { background: transparent; }
 .attach svg { width: 22px; height: 22px; fill: none; stroke: #54656f; stroke-width: 1.8; stroke-linecap: round; }
@@ -236,6 +243,7 @@ table { border-collapse: collapse; width: 100%; }
 
 @media (max-width: 1100px) {
   .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .path-panel.compact { left: auto; right: 16px; }  /* the stacked phone sits on the left */
   .verify-grid { grid-template-columns: 1fr; }
   .verify-grid .phone, .verify-grid .verify-side { grid-column: 1; grid-row: auto; }
   .verify-grid .phone { position: relative; top: 0; height: 600px; }

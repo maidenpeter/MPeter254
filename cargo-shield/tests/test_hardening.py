@@ -34,7 +34,8 @@ def test_hero_flight_is_always_still_to_fly():
         assert dep > anchor, anchor
         assert booked <= anchor, anchor
         assert (dep - booked) < timedelta(hours=12), anchor
-        assert dep.weekday() in route.days, anchor
+        assert route.flies_on(dep), anchor
+        assert route.origin == "NBO", anchor
 
 
 def test_seed_survives_a_different_route_file(tmp_path, monkeypatch):
@@ -45,9 +46,9 @@ def test_seed_survives_a_different_route_file(tmp_path, monkeypatch):
     shutil.copytree(config.config_dir(), cfg)
     routes = tmp_path / "routes.csv"
     routes.write_text("origin,destination,days_of_week,departure_local\n"
-                      "NBO,DXB,Mon|Thu,02:15\nDXB,NBO,Tue|Fri,09:40\nNBO,EBB,Wed,13:00\n")
-    text = (cfg / "settings.yaml").read_text().replace("routes_csv: data/routes.csv", f"routes_csv: {routes}")
-    (cfg / "settings.yaml").write_text(text)
+                      "NBO,DXB,Mon|Thu,02:15\nDXB,NBO,Tue|Fri,09:40\nNBO,EBB,Wed,13:00\n", encoding="utf-8")
+    text = (cfg / "settings.yaml").read_text(encoding="utf-8").replace("routes_csv: data/routes.csv", f"routes_csv: {routes}")
+    (cfg / "settings.yaml").write_text(text, encoding="utf-8")
     monkeypatch.setenv("CARGOSHIELD_CONFIG_DIR", str(cfg))
     config.reload()
     try:
@@ -86,7 +87,8 @@ def test_no_cover_after_departure(conn):
     past = conn.execute(
         "SELECT b.id FROM booking b JOIN risk_score r ON r.booking_id = b.id "
         "WHERE r.band = 'LOW' AND b.status = 'accepted' AND b.flight_date < date('now', '-2 day') "
-        "AND b.declared_value_usd > b.weight_kg * 40 + 2000 LIMIT 1"
+        "AND b.declared_value_usd > b.weight_kg * 40 + 2000 "
+        "AND NOT EXISTS (SELECT 1 FROM policy p WHERE p.booking_id = b.id) LIMIT 1"
     ).fetchone()["id"]
     q = policies.quote_booking(conn, past)
     assert not q.eligible and "before departure" in q.reason
@@ -130,7 +132,8 @@ def test_tiny_top_up_is_not_offered():
 def test_public_status_does_not_reveal_the_review_flag(conn):
     high = db.get_meta(conn, "demo")["hero_high_awb"]
     low = conn.execute("SELECT awb FROM booking b JOIN risk_score r ON r.booking_id = b.id "
-                       "WHERE r.band = 'LOW' AND b.status = 'accepted' LIMIT 1").fetchone()["awb"]
+                       "WHERE r.band = 'LOW' AND b.status = 'accepted' AND b.flight_date > date('now', '+1 day') "
+                       "LIMIT 1").fetchone()["awb"]
     a, b = verify.check_awb(conn, high), verify.check_awb(conn, low)
     assert a.result == b.result == verify.GENUINE
     assert a.details["carriage_status"] == b.details["carriage_status"]
@@ -145,13 +148,14 @@ def test_rejected_booking_is_not_active_not_genuine(conn):
 
 
 def test_policy_number_alone_reveals_nothing(conn):
-    out = messaging.handle_message(conn, M("whatsapp-sim", "u", text="CSP-0000001"))
+    p = _issue_clean(conn)
+    no = policies.policy_no(p["id"])
+    out = messaging.handle_message(conn, M("whatsapp-sim", "u", text=no))
     assert out.result == verify.UNREADABLE and "air waybill" in out.text and "USD" not in out.text
-    p = policies.get(conn, 1)
     real_awb = conn.execute("SELECT awb FROM booking WHERE id = ?", (p["booking_id"],)).fetchone()["awb"]
-    ok = messaging.handle_message(conn, M("whatsapp-sim", "u", text=f"CSP-0000001 {awb.fmt(real_awb)}"))
+    ok = messaging.handle_message(conn, M("whatsapp-sim", "u", text=f"{no} {awb.fmt(real_awb)}"))
     assert ok.result == verify.GENUINE
-    wrong = messaging.handle_message(conn, M("whatsapp-sim", "u", text="CSP-0000001 999-12345675"))
+    wrong = messaging.handle_message(conn, M("whatsapp-sim", "u", text=f"{no} 999-12345675"))
     assert wrong.result == verify.SUSPICIOUS and "USD" not in wrong.text
 
 
@@ -174,6 +178,8 @@ def test_phone_numbers_are_not_stored_in_the_log(conn):
     "https://evil.example@localhost/verify/policy/{t}",
     "https://evil\\@localhost/verify/policy/{t}",
     "cargoshield-verify.example/verify/policy/{t}",
+    "https://localhost:8000@evil.example/verify/policy/{t}",
+    "http://127.0.0.1:80@cargoshield-verify.example/verify/policy/{t}",
 ])
 def test_foreign_or_malformed_links_in_chat_are_suspicious(conn, template):
     token = _issue_clean(conn)["qr_token"]
@@ -187,6 +193,7 @@ def test_foreign_or_malformed_links_in_chat_are_suspicious(conn, template):
     "cargoshield-verify.example/verify/policy/{t}",
     "https://evil\\@localhost/verify/policy/{t}",
     "https://demo-airline-cargo.example/track?awb={awb}",
+    "https://localhost:8000@evil.example/verify/policy/{t}",
 ])
 def test_look_alike_qr_codes_are_suspicious(conn, payload):
     token = _issue_clean(conn)["qr_token"]
@@ -243,6 +250,10 @@ def test_staff_pages_are_closed_to_other_devices(seeded):
         assert phone.post("/api/admin/reset").status_code == 403
         assert phone.get("/api/policies/1/qr.png").status_code == 403
         assert phone.get("/graph/shipper/1").status_code == 403
+        for path in ("/", "/api/bookings", "/api/review-queue", "/api/verifications", "/api/documents",
+                     "/api/demo", "/files/fakes/fake_awb_clearance_fee.png", "/static/app.js", "/docs"):
+            assert phone.get(path).status_code == 403, path
+        assert phone.post("/api/policies", json={"booking_id": 1}).status_code == 403
         assert phone.get("/verify/awb/999-12345675").status_code == 200  # public
 
 
@@ -254,7 +265,7 @@ def test_cross_site_posts_are_refused(client):
 
 def test_booking_api_refuses_fake_and_foreign_awbs(client, conn):
     sid = conn.execute("SELECT id FROM shipper LIMIT 1").fetchone()[0]
-    body = {"shipper_id": sid, "origin": "NBO", "destination": "JNB", "flight_date": "2026-12-01",
+    body = {"shipper_id": sid, "origin": "NBO", "destination": "JNB",
             "commodity_text": "Documents", "pieces": 1, "weight_kg": 2, "volume_m3": 0.01,
             "declared_value_usd": 50, "payment_method": "card", "lead_time_hours": 48}
     from cargoshield import fakes

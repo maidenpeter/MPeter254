@@ -29,6 +29,7 @@ def booking_features(
     shipper: Mapping[str, Any],
     route_freq: Mapping[str, float] | None = None,
     linked: Mapping[str, Any] | None = None,
+    other_flag: str | None = None,
 ) -> dict[str, Any]:
     cls = booking["commodity_class"]
     spec = commodity.info(cls)
@@ -91,6 +92,8 @@ def booking_features(
         "kyc_status": shipper["kyc_status"],
         # network
         "route_weekly_bookings": route_weekly,
+        "shipper_other_flagged": other_flag is not None,
+        "shipper_other_flag_text": other_flag or "",
         "linked_flagged_count": linked_count,
         "linked_via": via_text,
         "linked_flagged_text": (

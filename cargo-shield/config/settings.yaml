@@ -4,8 +4,9 @@
 
 airline:
   name: Demo Airline
-  # 3-digit airline prefix for air waybills. 999 is a placeholder.
-  # Swap in the real prefix only once the airline has given permission.
+  # 3-digit airline prefix for air waybills. The brief asked for 999, but 999 is
+  # Air China's real cargo prefix, so change it before showing anyone in the
+  # industry: to the airline's own prefix once it has given permission.
   awb_prefix: "999"
 
 paths:
@@ -55,5 +56,24 @@ cover:
   risk_multiplier:
     LOW: 1.0
     MEDIUM: 1.75
+  # Transit cover runs from booking until this many days after the flight date.
+  cover_days_after_flight: 30
+  # A priced quote is still shown, but cover can't be bought online (it goes to an
+  # underwriter) when the shipper isn't KYC-verified or is flagged, for these
+  # commodity classes (specie needs its own wording), or when any of these rules fired.
+  refer_classes: [valuables]
+  refer_if_rules:
+    - new_shipper_high_value
+    - vague_description_dense
+    - vague_description_high_value
+    - weight_volume_mismatch
+    - implausible_weight
+    - late_booking_risky_payment
+    - linked_to_flagged_shipper
+    - shipper_has_other_flagged_booking
+    - watchlist_shipper
+  basis: >-
+    Pays the part of the goods' value above the carrier's liability under the Montreal
+    Convention (Art. 22(3)). No value is declared for carriage on the air waybill.
   currency: USD
   disclaimer: "Illustrative prices for a demo. Not real rates and not an offer of insurance."

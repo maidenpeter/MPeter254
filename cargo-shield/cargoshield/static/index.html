@@ -14,7 +14,7 @@
     <div class="brand">
       <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2 4 6v9c0 7.5 5.1 13.4 12 15 6.9-1.6 12-7.5 12-15V6z"/><path class="tick" d="m10.5 16 4 4 7-8"/></svg>
       <div>
-        <div class="brand-name">CargoShield</div>
+        <h1 class="brand-name">CargoShield</h1>
         <div class="brand-sub">Trust and risk layer for <span id="airline">Demo Airline</span></div>
       </div>
     </div>
@@ -37,7 +37,7 @@
 
   <section class="kpis" aria-label="Headline numbers">
     <div class="kpi"><div class="kpi-label">Bookings screened</div><div class="kpi-value" id="k-screened">–</div><div class="kpi-foot" id="k-screened-foot">every booking scored before acceptance</div></div>
-    <div class="kpi"><div class="kpi-label">Flagged for review</div><div class="kpi-value warn" id="k-flagged">–</div><div class="kpi-foot" id="k-flagged-foot">&nbsp;</div></div>
+    <div class="kpi"><div class="kpi-label">Sent to review</div><div class="kpi-value warn" id="k-flagged">–</div><div class="kpi-foot" id="k-flagged-foot">&nbsp;</div></div>
     <div class="kpi"><div class="kpi-label">Policies issued</div><div class="kpi-value" id="k-policies">–</div><div class="kpi-foot" id="k-policies-foot">&nbsp;</div></div>
     <div class="kpi"><div class="kpi-label">Premium written</div><div class="kpi-value" id="k-premium">–</div><div class="kpi-foot">illustrative pricing</div></div>
     <div class="kpi"><div class="kpi-label">Fakes caught</div><div class="kpi-value bad" id="k-fakes">–</div><div class="kpi-foot" id="k-fakes-foot">&nbsp;</div></div>
@@ -55,11 +55,11 @@
       <div class="toolbar">
         <input type="search" id="search" placeholder="Search AWB, airport or goods" aria-label="Search bookings">
         <div class="segmented" id="band-filter" role="group" aria-label="Filter by risk band">
-          <button data-band="" class="on">All</button>
-          <button data-band="FLAGGED">Flagged</button>
-          <button data-band="HIGH">High</button>
-          <button data-band="MEDIUM">Medium</button>
-          <button data-band="LOW">Low</button>
+          <button data-band="" class="on" aria-pressed="true">All</button>
+          <button data-band="FLAGGED" aria-pressed="false">Medium + High</button>
+          <button data-band="HIGH" aria-pressed="false">High</button>
+          <button data-band="MEDIUM" aria-pressed="false">Medium</button>
+          <button data-band="LOW" aria-pressed="false">Low</button>
         </div>
         <select id="sort" aria-label="Sort">
           <option value="recent">Newest first</option>
@@ -98,10 +98,11 @@
           </div>
           <div class="chat" id="chat" aria-live="polite"></div>
           <form class="composer" id="composer">
-            <label class="attach" title="Send a photo"><input type="file" id="file" accept="image/*" hidden>
+            <input type="file" id="file" accept="image/*" hidden>
+            <button type="button" class="attach" id="attach" aria-label="Send a photo" title="Send a photo">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.5v10a4.5 4.5 0 0 1-9 0V5a3 3 0 0 1 6 0v10.5a1.5 1.5 0 0 1-3 0V6.5"/></svg>
-            </label>
-            <input type="text" id="msg" placeholder="Type an AWB number, e.g. 999-12345675" autocomplete="off" aria-label="Message">
+            </button>
+            <input type="text" id="msg" placeholder="AWB number, or send a photo" autocomplete="off" aria-label="Message">
             <button class="send" type="submit" aria-label="Send"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11.5 21 3l-8.5 18-2-7.5z"/></svg></button>
           </form>
           <div class="drop-hint" id="drop-hint">Drop the photo to send it</div>
@@ -119,7 +120,7 @@
 
   <!-- Booking detail drawer -->
   <div class="scrim" id="scrim" hidden></div>
-  <aside class="drawer" id="drawer" aria-hidden="true" aria-label="Booking detail">
+  <aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="d-awb" aria-hidden="true">
     <div class="drawer-inner" id="drawer-body"></div>
   </aside>
 

@@ -11,3 +11,5 @@ data/*.joblib
 data/samples/
 # screenshots and scratch output
 output/
+data/fakes/*.png
+data/fakes/*.jpg

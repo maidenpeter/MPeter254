@@ -120,7 +120,7 @@ def test_engine_never_reads_ground_truth():
     src = Path(risk.__file__).parent
     for name in ("risk.py", "features.py", "anomaly.py", "graph.py", "pricing.py", "verify.py", "messaging.py",
                  "policies.py", "simulate.py"):
-        tree = ast.parse((src / name).read_text())
+        tree = ast.parse((src / name).read_text(encoding="utf-8"))
         docstrings = set()
         for node in ast.walk(tree):
             if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
@@ -145,9 +145,9 @@ def test_rules_are_tunable_from_yaml(tmp_path, conn, monkeypatch):
     """Changing a weight in rules.yaml changes the score with no code change."""
     cfg_dir = tmp_path / "config"
     shutil.copytree(config.config_dir(), cfg_dir)
-    text = (cfg_dir / "rules.yaml").read_text()
+    text = (cfg_dir / "rules.yaml").read_text(encoding="utf-8")
     text = text.replace("  - id: kyc_pending\n    weight: 8", "  - id: kyc_pending\n    weight: 33")
-    (cfg_dir / "rules.yaml").write_text(text)
+    (cfg_dir / "rules.yaml").write_text(text, encoding="utf-8")
 
     row = conn.execute(
         "SELECT b.*, s.created_at AS s_created_at, s.kyc_status AS s_kyc FROM booking b "

@@ -73,7 +73,7 @@ def simulate_booking(conn: sqlite3.Connection, model: AnomalyModel, rng: random.
         b = g.clean_booking(s)
         route = next(r for r in g.routes if r.origin == b["origin"] and r.destination == b["destination"])
         booked, dep = _now_timing(g, route, rng.lognormvariate(3.9, 0.6))
-        b.update(booked_at=db.iso(booked), flight_date=dep.date().isoformat(),
+        b.update(booked_at=db.iso(booked), flight_date=route.local_date(dep).isoformat(),
                  lead_time_hours=round((dep - booked).total_seconds() / 3600, 1))
         b["shipper_id"] = s["id"]
     else:

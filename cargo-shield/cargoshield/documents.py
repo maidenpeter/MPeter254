@@ -128,6 +128,9 @@ def draw_certificate(
     sum_insured_usd: float,
     premium_usd: float | None,
     issued_on: str,
+    value_of_goods_usd: float | None = None,
+    basis: str | None = None,
+    valid_until: str | None = None,
     qr_data: str | None = None,
     verify_hint: str | None = None,
     issuer: str = "CargoShield cover",
@@ -148,16 +151,27 @@ def draw_certificate(
         ("Route", route),
         ("Flight date", flight_date),
         ("Goods", goods),
-        ("Sum insured", f"USD {sum_insured_usd:,.2f}"),
     ]
+    if value_of_goods_usd is not None:
+        rows.append(("Value of goods", f"USD {value_of_goods_usd:,.2f}"))
+    rows.append(("Sum insured", f"USD {sum_insured_usd:,.2f}"))
     if premium_usd is not None:
         rows.append(("Premium", f"USD {premium_usd:,.2f}"))
     rows.append(("Issued on", issued_on))
-    y = 240
+    if valid_until:
+        rows.append(("Cover ends", valid_until))
+    y = 230
+    step = 64 if len(rows) > 9 else 74
     for k, v in rows:
         d.text((70, y), k, font=font(26), fill=MUTED)
         d.text((420, y), v, font=font(34), fill=INK)
-        y += 74
+        y += step
+    if basis:
+        d.text((70, y + 4), "Basis of cover", font=font(22), fill=MUTED)
+        d.text((420, y + 4), basis[:60], font=font(22), fill=INK)
+        if len(basis) > 60:
+            d.text((420, y + 34), basis[60:120], font=font(22), fill=INK)
+        y += 70
 
     if qr_data:
         qr = qr_image(qr_data, box_size=9).resize((420, 420), Image.NEAREST)

@@ -35,6 +35,7 @@ def seeded(data_dir) -> dict:
 def conn(seeded):
     from cargoshield import db
 
+    db.restore()  # start from the demo start state, whatever earlier tests changed
     c = db.connect()
     yield c
     c.close()

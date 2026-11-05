@@ -52,6 +52,34 @@ def get_meta(conn: sqlite3.Connection, key: str, default: Any = None) -> Any:
     return json.loads(row["value"]) if row else default
 
 
+def is_seeded(path: str | Path | None = None) -> bool:
+    """True if the database file holds a seeded demo (not missing, empty or half-built)."""
+    path = Path(path or config.db_path())
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    try:
+        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            row = c.execute("SELECT value FROM demo_meta WHERE key = 'seeded_at'").fetchone()
+        finally:
+            c.close()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
+def copy_database(src: sqlite3.Connection, target: str | Path) -> None:
+    """Overwrite the database at `target` with the contents of `src` (SQLite backup API).
+
+    Safe while other connections have `target` open, unlike deleting the file.
+    """
+    dst = sqlite3.connect(str(target), timeout=10)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+
+
 def snapshot(conn: sqlite3.Connection, target: str | Path | None = None) -> Path:
     """Copy the live database to the demo start snapshot (SQLite backup API)."""
     target = Path(target or config.snapshot_path())

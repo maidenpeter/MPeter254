@@ -23,6 +23,7 @@ ICONS = {
     verify.SUSPICIOUS: "⚠️",
     verify.INVALID: "✏️",
     verify.NOT_ACTIVE: "⚠️",
+    verify.OTHER_AIRLINE: "ℹ️",
     verify.UNREADABLE: "📷",
 }
 
@@ -32,7 +33,7 @@ _LONG_DIGITS = re.compile(r"[0-9][0-9\s\-–.]{6,}[0-9]")
 
 @dataclass
 class IncomingMessage:
-    channel: str  # e.g. "whatsapp-sim", "whatsapp"
+    channel: str  # e.g. "chat-sim" (the demo's simulator), "whatsapp"
     sender: str  # opaque id; never stored with the verification log
     text: str | None = None
     image: bytes | None = None
@@ -66,8 +67,7 @@ def _format(res: verify.VerifyResult) -> OutgoingMessage:
     icon = ICONS.get(res.result, "")
     head = f"{icon} {res.result}".strip()
     lines = [head, res.message]
-    if res.result == verify.GENUINE and res.kind == "awb":
-        lines.append(f"Only pay through {config.airline_name()}'s official channels.")
+    lines += [f"⚠️ {w}" for w in res.warnings]
     return OutgoingMessage("\n".join(lines), res.result, res.kind, res.details)
 
 

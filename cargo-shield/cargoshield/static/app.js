@@ -21,6 +21,10 @@ const dayShort = (iso) => parseIso(iso).toLocaleDateString("en-GB", { day: "nume
 const stamp = (iso) => parseIso(iso).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 const resClass = (r) => String(r || "").replace(/\s+/g, "_");
 const STATUS = { accepted: "Accepted", in_review: "In review queue", on_hold: "On hold", rejected: "Rejected", new: "New" };
+const DECISION = { approve: "Approved", hold: "On hold", reject: "Rejected" };
+const KYC = { verified: "Verified", pending: "Pending", failed: "Failed (watchlist)" };
+const CHANNEL = { "chat-sim": "Chat (demo)", chat: "Chat", web: "Web page", api: "API", "qr-scan": "QR scan", test: "Test" };
+const label = (map, v) => map[v] || String(v || "").replace(/_/g, " ");
 
 const state = {
   band: "", q: "", sort: "recent", offset: 0, limit: 60, total: 0,
@@ -61,12 +65,12 @@ async function loadStats() {
   const p = state.stats;
   setKpi("#k-screened", num(s.screened), p && p.screened);
   setKpi("#k-flagged", num(s.flagged_high), p && p.flagged_high);
-  $("#k-flagged-foot").textContent = `HIGH, sent to a person · ${num(s.flagged_medium)} more MEDIUM`;
+  $("#k-flagged-foot").textContent = `HIGH: ${num(s.review_pending)} waiting now, ${num(s.review_decided)} decided · ${num(s.flagged_medium)} MEDIUM`;
   setKpi("#k-policies", num(s.policies_issued), p && p.policies_issued);
   $("#k-policies-foot").textContent = `${compactUsd(s.sum_insured_usd)} top-up cover written`;
   setKpi("#k-premium", usd(s.premium_written_usd), p && p.premium_written_usd);
   setKpi("#k-fakes", num(s.fakes_caught), p && p.fakes_caught);
-  $("#k-fakes-foot").textContent = `from ${num(s.checks_total)} verification checks`;
+  $("#k-fakes-foot").textContent = `documents and QR codes, of ${num(s.checks_total)} checks`;
   $("#review-count").textContent = s.review_pending;
   state.stats = s;
 }
@@ -81,12 +85,12 @@ function scoreHtml(score, band) {
 function rowHtml(b, fresh = false) {
   const reason = b.top_reason
     ? `${esc(b.top_reason)}${b.reason_count > 1 ? ` <span class="more">+${b.reason_count - 1}</span>` : ""}`
-    : `<span class="muted">No risk signals</span>`;
+    : (b.reason_count ? `<span class="muted">Unusual pattern only (supporting signal)</span>` : `<span class="muted">No risk signals</span>`);
   const tags = (b.has_policy ? `<span class="tag cover">Covered</span>` : "") +
     (b.status === "in_review" ? `<span class="tag">Review</span>` : b.status === "on_hold" ? `<span class="tag">On hold</span>` :
       b.status === "rejected" ? `<span class="tag">Rejected</span>` : "");
   return `<tr data-id="${b.id}" class="${fresh ? "fresh" : ""}">
-    <td class="mono">${esc(b.awb)}</td>
+    <td><button class="awb-link" data-open="${b.id}" aria-label="Open booking ${esc(b.awb)}">${esc(b.awb)}</button></td>
     <td>${esc(b.origin)} → ${esc(b.destination)}</td>
     <td>${dayShort(b.flight_date)}</td>
     <td>${esc(b.commodity_text)}${tags}</td>
@@ -145,18 +149,27 @@ function setLive(on) {
 
 /* ---------------------------------------------------------------- drawer */
 
+const BACKGROUND = [".topbar", ".kpis", ".tabs", "main", ".foot"];
+
 function openDrawer() {
+  if (!$("#drawer").classList.contains("open")) state.returnFocus = document.activeElement;
   $("#drawer").classList.add("open");
+  $("#drawer").inert = false;
   $("#drawer").setAttribute("aria-hidden", "false");
   $("#scrim").hidden = false;
+  BACKGROUND.forEach((s) => { const el = $(s); if (el) el.inert = true; });
 }
 
 function closeDrawer() {
+  const wasOpen = $("#drawer").classList.contains("open");
   $("#drawer").classList.remove("open");
+  $("#drawer").inert = true;
   $("#drawer").setAttribute("aria-hidden", "true");
   $("#scrim").hidden = true;
+  BACKGROUND.forEach((s) => { const el = $(s); if (el) el.inert = false; });
   state.openId = null;
   if (state.network) { state.network.destroy(); state.network = null; }
+  if (wasOpen && state.returnFocus && document.contains(state.returnFocus)) state.returnFocus.focus();
 }
 
 async function openBooking(id) {
@@ -191,10 +204,10 @@ function renderDetail(d) {
   $("#drawer-body").innerHTML = `
     <div class="d-head">
       <div>
-        <div class="d-awb">${esc(b.awb)}</div>
+        <h2 class="d-awb" id="d-awb">${esc(b.awb)}</h2>
         <div class="d-route">${esc(b.origin)} → ${esc(b.destination)} · flight ${day(b.flight_date)} · ${esc(STATUS[b.status] || b.status)}</div>
       </div>
-      <button class="close" id="close" aria-label="Close">×</button>
+      <button class="close" id="close" aria-label="Close booking">×</button>
     </div>
 
     <div class="card">
@@ -227,7 +240,7 @@ function renderDetail(d) {
       <div class="facts">
         <div><span>Name</span><b>${esc(s.name)}</b></div>
         <div><span>Country</span><b>${esc(s.country)}</b></div>
-        <div><span>KYC</span><b>${esc(s.kyc_status)}</b></div>
+        <div><span>KYC</span><b>${esc(label(KYC, s.kyc_status))}</b></div>
         <div><span>Account age at booking</span><b>${num(s.account_age_days_at_booking)} days</b></div>
         <div><span>Bookings</span><b>${num(s.bookings)}</b></div>
         <div><span>Contact</span><b>${esc(s.phone)}</b><span>${esc(s.email)}</span></div>
@@ -247,9 +260,10 @@ function renderDetail(d) {
     <div class="card" id="cover-card">${coverHtml(d)}</div>
 
     ${d.reviews.length ? `<div class="card"><h4>Review history</h4>${d.reviews.map((x) =>
-      `<div class="decision"><b>${esc(x.decision)}</b><span>${esc(x.note || "")}</span><span class="muted">${esc(x.decided_by)} · ${stamp(x.decided_at)}</span></div>`).join("")}</div>` : ""}
+      `<div class="decision"><b>${esc(label(DECISION, x.decision))}</b><span>${esc(x.note || "")}</span><span class="muted">${esc(x.decided_by)} · ${stamp(x.decided_at)}</span></div>`).join("")}</div>` : ""}
   `;
   $("#close").addEventListener("click", closeDrawer);
+  $("#close").focus();
   bindCover(d);
   drawGraph(s.id);
 }
@@ -261,7 +275,7 @@ function coverHtml(d) {
       <div class="policy">
         <img src="${p.qr_png}" alt="QR code that opens the verification page for this cover">
         <div class="actions">
-          <div><b>${esc(p.policy_no)}</b> · active</div>
+          <div><b>${esc(p.policy_no)}</b> · active${p.cover_ends ? ` until ${day(p.cover_ends)}` : ""}</div>
           <div class="muted">Sum insured ${usd(p.sum_insured_usd, 2)} · premium ${usd(p.premium_usd, 2)}</div>
           <button class="btn primary small" id="scan-qr">Scan the QR (opens what a phone would)</button>
           <button class="btn small" id="send-cert">Send the certificate to the chat</button>
@@ -278,11 +292,15 @@ function coverHtml(d) {
     const sign = ["Expense loading", "Profit margin"].includes(st.label) ? "+ " : st.label === "Carrier liability" ? "− " : "";
     return `<tr class="${isTotal ? "total" : ""}"><td>${sign}${esc(st.label)}</td><td class="f">${esc(st.formula)}</td><td class="num">${usd(st.value, 2)}</td></tr>`;
   }).join("");
+  const action = q.bindable
+    ? `<button class="btn primary" id="issue">Issue cover for ${usd(q.premium_usd, 2)}</button>`
+    : `<div class="notice"><b>Referred to an underwriter.</b> The price is shown, but cover can't be bought online because ${esc(q.referral_reasons.join(", and "))}.</div>`;
   return `<h4>Cover · top-up quote (${esc(q.band)} band)</h4>
     <table class="quote">${rows}</table>
+    <p class="disclaimer"><b>Basis:</b> ${esc(q.basis)}</p>
     <p class="disclaimer">${esc(q.disclaimer)} Rate on sum insured: ${(q.rate_on_sum_insured * 100).toFixed(3)}%.
-      Carrier liability uses the Montreal Convention limit in config; verify it before any real use.</p>
-    <button class="btn primary" id="issue">Issue cover for ${usd(q.premium_usd, 2)}</button>`;
+      The carrier liability limit is a setting; verify it before any real use.</p>
+    ${action}`;
 }
 
 function bindCover(d) {
@@ -382,15 +400,15 @@ async function loadReview() {
       <div class="muted">${esc(b.commodity_text)} · ${num(b.weight_kg, b.weight_kg < 100 ? 1 : 0)} kg · ${usd(b.declared_value_usd)}${b.status === "on_hold" ? " · <b>on hold</b>" : ""}</div>
       <ul>${b.reasons.filter((x) => x.kind === "rule").map((x) => `<li>${esc(x.text)}</li>`).join("")}</ul>
       <button class="link open">Open booking and fraud graph</button>
-      <textarea placeholder="Note for the file (required to reject)" maxlength="500"></textarea>
+      <textarea placeholder="Note for the file (required to reject)" maxlength="500" aria-label="Note for ${esc(b.awb)}"></textarea>
       <div class="row">
-        <button class="btn small approve" data-d="approve">Approve</button>
-        <button class="btn small hold" data-d="hold">Hold</button>
-        <button class="btn small reject" data-d="reject">Reject</button>
+        <button class="btn small approve" data-d="approve" aria-label="Approve ${esc(b.awb)}">Approve</button>
+        <button class="btn small hold" data-d="hold" aria-label="Hold ${esc(b.awb)}">Hold</button>
+        <button class="btn small reject" data-d="reject" aria-label="Reject ${esc(b.awb)}">Reject</button>
       </div>
     </div>`).join("") : `<p class="muted">Nothing waiting for review.</p>`;
   $("#review-decisions").innerHTML = q.recent_decisions.length ? q.recent_decisions.map((x) =>
-    `<div class="decision"><b>${esc(x.decision)}</b><span class="mono">${esc(x.awb)}</span><span>${esc(x.note || "")}</span><span class="muted">${stamp(x.decided_at)}</span></div>`).join("")
+    `<div class="decision"><b>${esc(label(DECISION, x.decision))}</b><span class="mono">${esc(x.awb)}</span><span>${esc(x.note || "")}</span><span class="muted">${stamp(x.decided_at)}</span></div>`).join("")
     : `<p class="muted">No decisions yet.</p>`;
 }
 
@@ -400,7 +418,7 @@ async function decide(card, decision) {
   try {
     await api(`/api/review/${id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision, note }) });
     toast(`Booking ${decision === "approve" ? "approved" : decision === "hold" ? "put on hold" : "rejected"}.`);
-    await Promise.all([loadReview(), loadStats()]);
+    await Promise.all([loadReview(), loadStats(), loadBookings()]);
   } catch (e) { toast(e.message); }
 }
 
@@ -426,7 +444,7 @@ async function chatSend(form) {
     typing.remove();
     addMsg("bot", r.text, { result: r.result });
     const box = $("#phone").getBoundingClientRect();
-    if (box.bottom > window.innerHeight) $("#phone").scrollIntoView({ behavior: "smooth", block: "end" });
+    if (box.bottom > window.innerHeight || box.top < 0) $("#phone").scrollIntoView({ behavior: "smooth", block: "end" });
   } catch (e) { typing.remove(); addMsg("bot", "Sorry, something went wrong: " + e.message); }
   loadStats(); loadLog();
 }
@@ -450,7 +468,7 @@ async function loadDocs() {
   const all = [...state.docs.fakes.map((d) => ({ ...d, label: "Fake" })), ...state.docs.samples.map((d) => ({ ...d, label: "Genuine" }))];
   $("#docs").innerHTML = all.map((d) => `
     <button class="doc" data-url="${esc(d.url)}" data-name="${esc(d.name)}" title="${esc(d.story)}">
-      <img src="${esc(d.url)}" alt="${esc(d.name)}" loading="lazy">
+      <img src="${esc(d.url)}" alt="" loading="lazy">
       <div class="doc-name">${esc(d.label)} ${d.kind === "certificate" ? "certificate" : "air waybill"}</div>
       <div class="doc-story">${esc(d.story)}</div>
     </button>`).join("");
@@ -459,8 +477,9 @@ async function loadDocs() {
 async function loadLog() {
   if ($("#tab-verify").hidden) return;
   const rows = await api("/api/verifications?limit=14");
-  $("#log-rows").innerHTML = rows.map((r) => `<tr><td>${stamp(r.checked_at)}</td><td>${esc(r.channel)}</td>
-    <td class="mono">${esc(r.input_value || "")}</td><td><span class="res ${resClass(r.result)}">${esc(r.result)}</span></td></tr>`).join("");
+  const shown = (v) => (String(v || "").startsWith("token ") ? "QR code" : v || "");
+  $("#log-rows").innerHTML = rows.map((r) => `<tr><td>${stamp(r.checked_at)}</td><td>${esc(label(CHANNEL, r.channel))}</td>
+    <td class="mono">${esc(shown(r.input_value))}</td><td><span class="res ${resClass(r.result)}">${esc(r.result)}</span></td></tr>`).join("");
 }
 
 async function greet() {
@@ -492,7 +511,13 @@ async function runStep(step) {
     showTab("verify");
     await loadDocs();
     $$(".doc").forEach((d) => d.classList.toggle("highlight", d.dataset.name === demo.demo_fake));
-    window.scrollTo({ top: 0, behavior: "smooth" });  // keep the Fakes caught counter in view
+    if (window.matchMedia("(max-width: 1100px)").matches) {
+      // Narrow screens stack the documents above the phone: show the document to click.
+      const el = $(`.doc[data-name="${demo.demo_fake}"]`);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    } else {
+      window.scrollTo({ top: 0, behavior: "smooth" });  // keep the Fakes caught counter in view
+    }
     toast("Click the highlighted document to send it into the chat.");
   } else if (step === "2") {
     showTab("bookings");
@@ -511,12 +536,13 @@ async function init() {
   let searchTimer;
   $("#search").addEventListener("input", (e) => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.q = e.target.value.trim(); loadBookings(); }, 250); });
   $$("#band-filter button").forEach((b) => b.addEventListener("click", () => {
-    $$("#band-filter button").forEach((x) => x.classList.toggle("on", x === b));
+    $$("#band-filter button").forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-pressed", String(x === b)); });
     state.band = b.dataset.band; loadBookings();
   }));
   $("#sort").addEventListener("change", (e) => { state.sort = e.target.value; loadBookings(); });
   $("#more").addEventListener("click", () => loadBookings(false));
   $("#booking-rows").addEventListener("click", (e) => { const tr = e.target.closest("tr[data-id]"); if (tr) openBooking(Number(tr.dataset.id)); });
+  $("#drawer").inert = true;
   $("#live").addEventListener("change", (e) => setLive(e.target.checked));
 
   // drawer
@@ -533,6 +559,7 @@ async function init() {
   // chat
   $("#composer").addEventListener("submit", (e) => { e.preventDefault(); const v = $("#msg").value; $("#msg").value = ""; sendText(v); });
   $("#file").addEventListener("change", (e) => { const f = e.target.files[0]; if (f) sendImage(f, f.name); e.target.value = ""; });
+  $("#attach").addEventListener("click", () => $("#file").click());
   $("#docs").addEventListener("click", async (e) => {
     const d = e.target.closest(".doc"); if (!d) return;
     d.classList.remove("highlight");

@@ -11,6 +11,7 @@ look-alike site.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from PIL import Image, ImageFilter
@@ -68,59 +69,67 @@ def _photo_look(img: Image.Image) -> Image.Image:
     return img.convert("RGB")
 
 
-def _render(spec: FakeSpec, prefix: str) -> Image.Image:
+def _d(anchor: datetime, days: int) -> str:
+    return (anchor + timedelta(days=days)).strftime("%d %b %Y").upper()
+
+
+def _render(spec: FakeSpec, prefix: str, anchor: datetime) -> Image.Image:
+    """Dates follow the seed time, so the stories hold whenever the demo runs:
+    'landed, pay to release' papers carry a recent past flight date, 'pay before
+    loading' ones a date a few days ahead, certificates an issue date before it."""
     number = awbmod.fmt(fake_awb(spec, prefix))
     if spec.filename == "fake_awb_clearance_fee.png":
         return documents.draw_awb(number, "Upendo General Merchants", "Nairobi, Kenya",
                                   "Kito Hardware Stores", "Lagos, Nigeria", "NBO NAIROBI", "LOS LAGOS",
-                                  "14 NOV 2026", 24, 340.0, "Mobile phones", 186000,
+                                  _d(anchor, -2), 24, 340.0, "Mobile phones", 186000,
                                   stamp="CLEARED FOR RELEASE",
                                   scam_note="Release on payment of USD 1,850 clearing fee to agent")
     if spec.filename == "fake_awb_gold_dore.png":
         return documents.draw_awb(number, "Neema Minerals Ltd", "Kampala, Uganda",
                                   "Bahari Bullion Trading", "Hong Kong", "NBO NAIROBI", "HKG HONG KONG",
-                                  "18 NOV 2026", 5, 25.0, "Gold dore", 1950000, stamp="PAID")
+                                  _d(anchor, 6), 5, 25.0, "Gold dore", 1950000, stamp="PAID")
     if spec.filename == "fake_awb_bad_check_phones.png":
         return documents.draw_awb(number, "Imara Devices Co. Ltd", "Hong Kong",
                                   "Zuri Mobile Ltd", "Nairobi, Kenya", "HKG HONG KONG", "NBO NAIROBI",
-                                  "11 NOV 2026", 40, 520.0, "Smartphones", 412000,
+                                  _d(anchor, -3), 40, 520.0, "Smartphones", 412000,
                                   scam_note="Balance of USD 9,500 due before goods are released")
     if spec.filename == "fake_awb_bad_check_generators.png":
         return documents.draw_awb(number, "Mlima Engineering Ltd", "Nairobi, Kenya",
                                   "Fahari Power SARL", "Kinshasa, DR Congo", "NBO NAIROBI", "FIH KINSHASA",
-                                  "20 NOV 2026", 6, 1200.0, "Diesel generators", 64000, stamp="LOADED")
+                                  _d(anchor, 4), 6, 1200.0, "Diesel generators", 64000, stamp="LOADED")
     if spec.filename == "fake_awb_phone_photo.jpg":
         return _photo_look(documents.draw_awb(
             number, "Tausi Trading Ltd", "Dar es Salaam, Tanzania", "Jua Electronics", "Nairobi, Kenya",
-            "DAR DAR ES SALAAM", "NBO NAIROBI", "16 NOV 2026", 18, 260.0, "Laptop computers", 98000,
+            "DAR DAR ES SALAAM", "NBO NAIROBI", _d(anchor, -1), 18, 260.0, "Laptop computers", 98000,
             stamp="CLEARED", scam_note="Pay storage charges to agent to avoid auction"))
     if spec.filename == "fake_cert_no_booking.png":
         return documents.draw_certificate(
             "Certificate of cargo insurance", "CSP-0904417", number, "Kito Hardware Stores",
-            "NBO to LOS", "14 NOV 2026", "Mobile phones", 186000, 2790, "10 NOV 2026",
+            "NBO to LOS", _d(anchor, -2), "Mobile phones", 186000, 2790, _d(anchor, -6),
             issuer="Cargo insurance")
     if spec.filename == "fake_cert_bad_check.png":
         return documents.draw_certificate(
             "Certificate of cargo insurance", "CSP-0771025", number, "Zuri Mobile Ltd",
-            "HKG to NBO", "11 NOV 2026", "Smartphones", 412000, 6180, "08 NOV 2026",
+            "HKG to NBO", _d(anchor, -3), "Smartphones", 412000, 6180, _d(anchor, -6),
             issuer="Cargo insurance")
     if spec.filename == "fake_cert_lookalike_qr.png":
         return documents.draw_certificate(
             "Certificate of cargo insurance", "CSP-0662930", number, "Bahari Bullion Trading",
-            "NBO to HKG", "18 NOV 2026", "Gold dore", 1950000, 29250, "15 NOV 2026",
+            "NBO to HKG", _d(anchor, 6), "Gold dore", 1950000, 29250, _d(anchor, 3),
             qr_data="https://cargoshield-verify.example/p/9KX2PQ",
             verify_hint="cargoshield-verify.example", issuer="CargoShield cover")
     raise ValueError(spec.filename)
 
 
-def generate(out_dir: Path | None = None, prefix: str | None = None) -> list[Path]:
+def generate(out_dir: Path | None = None, prefix: str | None = None, anchor: datetime | None = None) -> list[Path]:
     out_dir = Path(out_dir or config.fakes_dir())
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = prefix or config.awb_prefix()
+    anchor = anchor or datetime.utcnow()
     paths = []
     for spec in FAKES:
         p = out_dir / spec.filename
-        img = _render(spec, prefix)
+        img = _render(spec, prefix, anchor)
         if p.suffix.lower() == ".jpg":
             img.save(p, format="JPEG", quality=82)  # phone photos arrive as JPEG
         else:

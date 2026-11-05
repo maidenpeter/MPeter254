@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import re
 import secrets
 import sqlite3
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 from dataclasses import dataclass
 from typing import Any
 
 from . import awb as awbmod
-from . import db, documents, pricing, risk
+from . import commodity, config, db, documents, graph, pricing, risk
 
 _POLICY_NO_RE = re.compile(r"\bCSP[-\s]?(\d{5,8})\b", re.IGNORECASE)
 _LINK_RE = re.compile(r"(?P<prefix>\S*?)/verify/(?P<kind>policy|awb)/(?P<value>[A-Za-z0-9_\-]{6,64})")
@@ -77,6 +78,14 @@ def to_dict(row: sqlite3.Row | dict[str, Any], base_url: str | None = None) -> d
         "status": row["status"],
         "issued_at": row["issued_at"],
     }
+    if base_url:  # dashboard view: add the end of cover
+        fd = None
+        try:
+            fd = row["flight_date"]
+        except (IndexError, KeyError):
+            pass
+        if fd:
+            d["cover_ends"] = cover_ends(fd).isoformat()
     if base_url:
         d["verify_url"] = verify_url(base_url, row["qr_token"])
         d["qr_png"] = f"/api/policies/{row['id']}/qr.png"
@@ -86,15 +95,47 @@ def to_dict(row: sqlite3.Row | dict[str, Any], base_url: str | None = None) -> d
 
 def for_booking(conn: sqlite3.Connection, booking_id: int) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT * FROM policy WHERE booking_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1", (booking_id,)
+        "SELECT p.*, b.flight_date FROM policy p JOIN booking b ON b.id = p.booking_id "
+        "WHERE p.booking_id = ? AND p.status = 'active' ORDER BY p.id DESC LIMIT 1", (booking_id,)
     ).fetchone()
 
 
 def get(conn: sqlite3.Connection, pid: int) -> sqlite3.Row | None:
-    return conn.execute("SELECT * FROM policy WHERE id = ?", (pid,)).fetchone()
+    return conn.execute(
+        "SELECT p.*, b.flight_date FROM policy p JOIN booking b ON b.id = p.booking_id WHERE p.id = ?", (pid,)
+    ).fetchone()
 
 
-def quote_booking(conn: sqlite3.Connection, booking_id: int) -> pricing.Quote:
+def departure_of(row: Any) -> datetime:
+    return db.parse_dt(row["booked_at"]) + timedelta(hours=row["lead_time_hours"])
+
+
+def cover_ends(flight_date: str) -> date:
+    days = int(config.settings()["cover"].get("cover_days_after_flight", 30))
+    return date.fromisoformat(flight_date[:10]) + timedelta(days=days)
+
+
+def referral_reasons(conn: sqlite3.Connection, b: Any, flagged: set[int] | None = None) -> list[str]:
+    """Why cover for this booking needs an underwriter rather than a click."""
+    c = config.settings()["cover"]
+    out = []
+    shipper = conn.execute("SELECT id, kyc_status FROM shipper WHERE id = ?", (b["shipper_id"],)).fetchone()
+    if shipper["kyc_status"] != "verified":
+        out.append("the shipper's KYC checks are not complete")
+    if shipper["id"] in (flagged if flagged is not None else graph.flagged_shippers(conn)):
+        out.append("the shipper is under internal review")
+    if b["commodity_class"] in (c.get("refer_classes") or []):
+        out.append(f"{commodity.label(b['commodity_class']).lower()} need specialist cover")
+    hits = conn.execute("SELECT rule_hits_json FROM risk_score WHERE booking_id = ?", (b["id"],)).fetchone()
+    fired = {h["id"] for h in json.loads(hits["rule_hits_json"])} if hits else set()
+    if fired & set(c.get("refer_if_rules") or []):
+        out.append("the risk reasons on this booking need a person to look at them")
+    return out
+
+
+def quote_booking(conn: sqlite3.Connection, booking_id: int, as_of: datetime | None = None,
+                  flagged: set[int] | None = None) -> pricing.Quote:
+    """The quote as the dashboard shows it. `as_of` is the moment of purchase (now by default)."""
     b = conn.execute(
         "SELECT b.*, r.band FROM booking b LEFT JOIN risk_score r ON r.booking_id = b.id WHERE b.id = ?", (booking_id,)
     ).fetchone()
@@ -107,12 +148,16 @@ def quote_booking(conn: sqlite3.Connection, booking_id: int) -> pricing.Quote:
     if q.eligible and b["status"] in ("on_hold", "rejected"):
         q.eligible = False
         q.reason = f"The booking is {b['status'].replace('_', ' ')} after review, so cover is not offered."
-    departure = db.parse_dt(b["booked_at"]) + timedelta(hours=b["lead_time_hours"])
-    if q.eligible and departure <= db.utcnow():
+    departure = departure_of(b)
+    if q.eligible and departure <= (as_of or db.utcnow()):
         # Cover has to be bought before the risk starts (no insuring a known outcome).
         q.eligible = False
+        q.bindable = False
         q.reason = (f"This flight left on {departure:%d %b %Y}. Cover has to be bought before departure, "
                     "so it is no longer offered.")
+    if q.eligible:
+        q.referral_reasons = referral_reasons(conn, b, flagged)
+        q.bindable = not q.referral_reasons
     return q
 
 
@@ -124,13 +169,22 @@ def issue(conn: sqlite3.Connection, booking_id: int) -> sqlite3.Row:
     q = quote_booking(conn, booking_id)
     if not q.eligible:
         raise CoverError(q.reason or "Not eligible for cover.")
+    if not q.bindable:
+        raise CoverError("Referred to an underwriter: " + "; ".join(q.referral_reasons) + ".")
     token = secrets.token_urlsafe(24)  # 192 bits, unguessable
-    cur = conn.execute(
-        "INSERT INTO policy (booking_id, sum_insured_usd, premium_usd, status, qr_token, issued_at) "
-        "VALUES (?, ?, ?, 'active', ?, ?)",
-        (booking_id, q.sum_insured_usd, q.premium_usd, token, db.iso(db.utcnow())),
-    )
-    conn.commit()
+    try:
+        cur = conn.execute(
+            "INSERT INTO policy (booking_id, sum_insured_usd, premium_usd, status, qr_token, issued_at) "
+            "VALUES (?, ?, ?, 'active', ?, ?)",
+            (booking_id, q.sum_insured_usd, q.premium_usd, token, db.iso(db.utcnow())),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:  # a second click raced the first: one active policy per booking
+        conn.rollback()
+        existing = for_booking(conn, booking_id)
+        if existing:
+            return existing
+        raise
     return get(conn, int(cur.lastrowid))
 
 
@@ -158,6 +212,9 @@ def certificate_png(conn: sqlite3.Connection, pid: int, base_url: str) -> bytes:
         p["sum_insured_usd"],
         p["premium_usd"],
         p["issued_at"][:10],
+        value_of_goods_usd=b["declared_value_usd"],
+        basis="In excess of carrier liability (Montreal Convention Art. 22(3)). No value declared for carriage.",
+        valid_until=f"{cover_ends(b['flight_date']):%d %b %Y}",
         qr_data=url,
         verify_hint="Or send this certificate to the\nCargoShield chat to check it.",
     )

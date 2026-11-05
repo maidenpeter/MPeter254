@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import os
+import time
 from functools import lru_cache
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -16,7 +17,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 # Tesseract's OpenMP threads busy-wait. With other work on the machine one image
 # can take minutes instead of a second, so run it single-threaded.
 os.environ.setdefault("OMP_THREAD_LIMIT", "1")
-OCR_TIMEOUT_S = 12  # give up and ask for the number rather than freeze the chat
+OCR_TIMEOUT_S = 12  # total budget for one photo: give up and ask for the number rather than freeze the chat
 
 Image.MAX_IMAGE_PIXELS = 40_000_000
 MAX_PIXELS = 25_000_000  # a 50-megapixel phone photo is far more than OCR needs
@@ -94,12 +95,15 @@ def read_text(img: Image.Image) -> str | None:
         return None
     import pytesseract
 
+    started = time.monotonic()
     g = _prep(img)
     try:
         text = pytesseract.image_to_string(g, timeout=OCR_TIMEOUT_S)
-        # A second pass treating the page as one block helps with tilted photos.
-        if sum(ch.isdigit() for ch in text) < 11:
-            text += "\n" + pytesseract.image_to_string(g, config="--psm 6", timeout=OCR_TIMEOUT_S)
+        # A second pass treating the page as one block helps with tilted photos,
+        # within what is left of the same budget.
+        left = OCR_TIMEOUT_S - (time.monotonic() - started)
+        if sum(ch.isdigit() for ch in text) < 11 and left > 2:
+            text += "\n" + pytesseract.image_to_string(g, config="--psm 6", timeout=left)
     except RuntimeError:  # pytesseract raises RuntimeError on timeout
         return ""
     return text

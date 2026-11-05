@@ -65,6 +65,10 @@ class Quote:
     rate_on_sum_insured: float = 0.0
     currency: str = "USD"
     disclaimer: str = ""
+    basis: str = ""
+    # A priced quote can still need an underwriter before cover is bound.
+    bindable: bool = False
+    referral_reasons: list[str] = field(default_factory=list)
     steps: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -79,7 +83,8 @@ def quote(declared_value_usd: float, weight_kg: float, commodity_class: str, ban
     c = config.settings()["cover"]
     q = Quote(eligible=False, band=band, declared_value_usd=float(declared_value_usd),
               weight_kg=float(weight_kg), commodity_class=commodity_class,
-              currency=c.get("currency", "USD"), disclaimer=c.get("disclaimer", ""))
+              currency=c.get("currency", "USD"), disclaimer=c.get("disclaimer", ""),
+              basis=" ".join(str(c.get("basis", "")).split()))
 
     multipliers = c["risk_multiplier"]
     if band == "HIGH" or band not in multipliers:
@@ -135,6 +140,7 @@ def quote(declared_value_usd: float, weight_kg: float, commodity_class: str, ban
     q.premium_usd = float(premium)
     q.rate_on_sum_insured = float((premium / sum_insured).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP))
     q.eligible = True
+    q.bindable = True  # the caller (policies.quote_booking) may refer it to an underwriter
 
     label = commodity.label(commodity_class)
     weight_txt = f"{weight.normalize():f}" if weight == weight.to_integral() else f"{weight:f}".rstrip("0")

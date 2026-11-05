@@ -10,14 +10,28 @@
 # weight_kg       plausible gross weight range for one booking
 # base_loss_rate  expected loss as a share of sum insured, before the risk multiplier
 
+# Reference prices the generator uses. Illustrative: check spot before a demo.
+reference_prices:
+  # Gold was about USD 3,900 per troy ounce on 1 November 2026 (pricegold.net).
+  gold_usd_per_oz: 3900
+
 classes:
   valuables:
     label: Valuables
     keywords: [gold, precious metal, bank note, banknote, cash, gemstone, jewel*, bullion, dore]
-    descriptions: [Gold bars, Gold dore, Precious metals, Bank notes, Gemstones]
+    descriptions: [Gold bars, Gold dore, Precious metals, Gemstones]
+    # Only planted (suspicious) shipments carry cash; established traders don't.
+    descriptions_planted_extra: [Bank notes]
+    # Value per kg by description. Gold follows reference_prices.gold_usd_per_oz.
+    priced_by_description:
+      Gold bars: {gold_spot_share: [0.97, 1.0]}
+      Gold dore: {gold_spot_share: [0.70, 0.90]}
+      Precious metals: {usd_per_kg: [20000, 60000]}
+      Gemstones: {usd_per_kg: [20000, 120000]}
+      Bank notes: {usd_per_kg: [40000, 100000]}
     density_kg_m3: [1200, 6500]
     typical_density: 3000
-    value_per_kg: [30000, 115000]
+    value_per_kg: [20000, 130000]
     weight_kg: [1, 40]
     piece_kg: 5
     high_value: true

@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import asdict, dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
@@ -33,13 +33,25 @@ NOT_FOUND = "NOT FOUND"
 INVALID = "INVALID FORMAT"
 SUSPICIOUS = "SUSPICIOUS"
 NOT_ACTIVE = "NOT ACTIVE"
+OTHER_AIRLINE = "OTHER AIRLINE"
 UNREADABLE = "UNREADABLE"
 
 FAKE_RESULTS = (NOT_FOUND, SUSPICIOUS)
+DOCUMENT_INPUTS = ("image", "qr", "link")  # what counts towards "fakes caught"
 
 DO_NOT_PAY = ("Do not pay anyone, release goods or hand over money on the strength of this document. "
-              "Call {airline} cargo on the number published on our official website.")
-CHECK_MATCH = "Check that the air waybill number and sum insured match your document."
+              "Call {airline} cargo on the number on {airline}'s official website.")
+CHECK_MATCH = "Check that the air waybill number and sum insured match your certificate."
+OFFICIAL_CHANNELS = "Only pay through {airline}'s official channels."
+
+# Wording that appears on scam paperwork and never on a real air waybill: fees
+# demanded by an "agent" before goods are released or loaded.
+_SCAM_RE = re.compile(
+    r"(clear(ing|ance)|release|storage|demurrage|customs|handling)\s+(fee|charge)s?"
+    r"|pay(ment)?\b[^.\n]{0,60}\bto\s+(the\s+|our\s+)?agent"
+    r"|balance\s+of\s+usd[^.\n]{0,40}\bdue",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -102,9 +114,34 @@ def _foreign_link(where: str | None, kind: str = "policy") -> VerifyResult:
 
 def _lookup_awb(conn: sqlite3.Connection, number: str) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT id, awb, origin, destination, flight_date, pieces, weight_kg, status FROM booking WHERE awb = ?",
+        "SELECT id, awb, origin, destination, flight_date, pieces, weight_kg, status, booked_at, lead_time_hours "
+        "FROM booking WHERE awb = ?",
         (number,),
     ).fetchone()
+
+
+def _carriage_status(row: sqlite3.Row) -> str:
+    # Public wording follows the flight only. A booking waiting for a reviewer reads
+    # exactly like any other one, so the internal flag never shows.
+    full = conn_row_departure(row)
+    if full is not None and full <= db.utcnow():
+        return "Flown"
+    return "Booked"
+
+
+def conn_row_departure(row: sqlite3.Row):
+    try:
+        return db.parse_dt(row["booked_at"]) + timedelta(hours=row["lead_time_hours"])
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def _weight(w: float) -> str:
+    return f"{w:,.1f} kg" if w < 100 else f"{w:,.0f} kg"
+
+
+def _pieces(n: int) -> str:
+    return "1 piece" if n == 1 else f"{n} pieces"
 
 
 def _awb_details(row: sqlite3.Row) -> dict[str, Any]:
@@ -116,7 +153,7 @@ def _awb_details(row: sqlite3.Row) -> dict[str, Any]:
         "flight_date": row["flight_date"],
         "pieces": row["pieces"],
         "weight_kg": row["weight_kg"],
-        "carriage_status": "Booked",
+        "carriage_status": _carriage_status(row),
     }
 
 
@@ -145,9 +182,9 @@ def check_awb(conn: sqlite3.Connection, text: str, from_document: bool = False) 
                             f"{shown} fails the air waybill check-digit test. Check the number for typing "
                             "mistakes. If you copied it from a document, treat that document as suspicious.", shown)
     if c.prefix != config.awb_prefix():
-        return VerifyResult(NOT_FOUND, "awb",
-                            f"{shown} is not a {airline} air waybill (prefix {c.prefix}). "
-                            "Check it with the airline that issued it.", shown)
+        return VerifyResult(OTHER_AIRLINE, "awb",
+                            f"{shown} is not a {airline} air waybill (its prefix {c.prefix} belongs to another "
+                            "airline). Check it with the airline that issued it.", shown)
     row = _lookup_awb(conn, c.awb)
     if row is None:
         return VerifyResult(NOT_FOUND, "awb",
@@ -161,7 +198,8 @@ def check_awb(conn: sqlite3.Connection, text: str, from_document: bool = False) 
     d = _awb_details(row)
     return VerifyResult(GENUINE, "awb",
                         f"{airline} issued air waybill {shown}: {d['origin']} to {d['destination']}, flight date "
-                        f"{nice_date(d['flight_date'])}, {d['pieces']} pieces, {d['weight_kg']:,.0f} kg.", shown, d)
+                        f"{nice_date(d['flight_date'])}, {_pieces(d['pieces'])}, {_weight(d['weight_kg'])}. "
+                        + OFFICIAL_CHANNELS.format(airline=airline), shown, d)
 
 
 def verify_awb(conn: sqlite3.Connection, text: str, channel: str = "api", input_type: str = "text",
@@ -197,10 +235,17 @@ def _policy_result(conn: sqlite3.Connection, p: sqlite3.Row | None, shown: str) 
     if p["status"] != "active":
         return VerifyResult(NOT_ACTIVE, "policy", f"Cover {d['policy_no']} exists but is no longer active.", shown,
                             {"policy_no": d["policy_no"], "status": p["status"]})
+    ends = policies.cover_ends(d["flight_date"])
+    if ends < db.utcnow().date():
+        return VerifyResult(NOT_ACTIVE, "policy",
+                            f"Cover {d['policy_no']} was real, but it ended on {ends:%d %b %Y}, after the shipment's "
+                            "transit. It does not cover anything now.", shown,
+                            {"policy_no": d["policy_no"], "status": "ended", "ended_on": ends.isoformat()})
+    d["cover_ends"] = ends.isoformat()
     return VerifyResult(GENUINE, "policy",
                         f"Cover {d['policy_no']} is real and active: air waybill {d['awb']}, {d['route']}, "
-                        f"flight date {nice_date(d['flight_date'])}, sum insured USD {d['sum_insured_usd']:,.2f}.",
-                        shown, d)
+                        f"flight date {nice_date(d['flight_date'])}, sum insured USD {d['sum_insured_usd']:,.2f}. "
+                        + CHECK_MATCH, shown, d)
 
 
 def check_policy_token(conn: sqlite3.Connection, token: str) -> VerifyResult:
@@ -256,6 +301,13 @@ def _route_mismatch(text: str, row: sqlite3.Row) -> bool:
     return not {row["origin"], row["destination"]} <= codes
 
 
+def _ocr_slip(number: str, expected: str) -> bool:
+    """True if `number` is `expected` with one digit misread (and so fails the check digit)."""
+    if len(number) != len(expected) or awbmod.validate(number).ok:
+        return False
+    return sum(a != b for a, b in zip(number, expected)) == 1
+
+
 def _is_certificate(text: str) -> bool:
     # An air waybill can mention insurance ("Amount of insurance: NIL"); only a page
     # that calls itself a certificate of cover/insurance is treated as one.
@@ -296,16 +348,17 @@ def check_image(conn: sqlite3.Connection, data: bytes, trusted_hosts: Iterable[s
         if res.result != GENUINE:
             return res
         cover_awb = res.details["awb"].replace("-", "")
-        printed_valid = [n for n in printed if awbmod.validate(n).ok]
-        if printed_valid and cover_awb not in printed_valid:
+        on_page = list(dict.fromkeys(printed + qr_numbers))
+        others = [n for n in on_page if n != cover_awb and not _ocr_slip(n, cover_awb)]
+        if others:
             return VerifyResult(SUSPICIOUS, "policy",
                                 f"The QR code belongs to genuine cover for a different shipment "
                                 f"({res.details['awb']}) than the one printed on this certificate "
-                                f"({awbmod.fmt(printed_valid[0])}). The certificate has been altered. "
+                                f"({awbmod.fmt(others[0])}). The certificate has been altered. "
                                 "Do not pay on the strength of it.", res.input_value)
-        res.message += " " + CHECK_MATCH
-        if not printed_valid:
-            res.warnings.append("The printed air waybill number could not be read to compare with the QR code.")
+        if not on_page:
+            res.warnings.append("The air waybill number printed on the certificate could not be read, so compare "
+                                "it with the one above yourself.")
         return res
 
     if text is None and not qr_numbers:
@@ -345,19 +398,24 @@ def check_image(conn: sqlite3.Connection, data: bytes, trusted_hosts: Iterable[s
         if pid is not None:
             return check_policy_number(conn, pid, number)
         row = _lookup_awb(conn, number)
-        res = _policy_result(conn, policies.for_booking(conn, row["id"]), awbmod.fmt(number))
-        if res.result == GENUINE:
-            res.message += " " + CHECK_MATCH
-        return res
+        return _policy_result(conn, policies.for_booking(conn, row["id"]), awbmod.fmt(number))
 
     res = check_awb(conn, number, from_document=True)
     if res.result == GENUINE:
         row = _lookup_awb(conn, number)
+        if _SCAM_RE.search(text):
+            return VerifyResult(SUSPICIOUS, "awb",
+                                f"Air waybill {awbmod.fmt(number)} is real, but this document asks for a fee to be "
+                                f"paid before the goods move. {_airline()} never collects fees through agents or "
+                                "chat messages. " + DO_NOT_PAY.format(airline=_airline()), awbmod.fmt(number))
         if _route_mismatch(text, row):
             return VerifyResult(SUSPICIOUS, "awb",
                                 f"Air waybill {awbmod.fmt(number)} is real, but the airports on this document don't "
                                 f"match the booking ({row['origin']} to {row['destination']}). The paperwork may have "
                                 "been altered. " + DO_NOT_PAY.format(airline=_airline()), awbmod.fmt(number))
+        res.message = (f"The number is real. This confirms the air waybill, route and flight only, not the rest "
+                       f"of the paper: check it shows {_pieces(row['pieces'])} and {_weight(row['weight_kg'])}. "
+                       + res.message)
     return res
 
 

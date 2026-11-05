@@ -31,7 +31,7 @@ def test_awbs_are_valid_unique_and_use_the_prefix(conn):
 
 def test_bookings_follow_the_route_file(conn):
     routes = {}
-    with open(config.routes_csv(), newline="") as fh:
+    with open(config.routes_csv(), newline="", encoding="utf-8") as fh:
         for r in csv.DictReader(fh):
             routes[(r["origin"], r["destination"])] = {seed.DAYS[d] for d in r["days_of_week"].split("|")}
     for r in conn.execute("SELECT origin, destination, flight_date FROM booking"):

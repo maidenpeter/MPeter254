@@ -98,6 +98,18 @@ def base_score(rule_hits: Iterable[dict[str, Any]], graph_rule_ids: set[str], ca
     return min(100, int(round(total)))
 
 
+def approved_bookings(conn: sqlite3.Connection) -> set[int]:
+    """Bookings whose latest review decision is 'approve': a person cleared them."""
+    return {
+        r["booking_id"]
+        for r in conn.execute(
+            "SELECT d.booking_id, d.decision FROM review_decision d "
+            "WHERE d.id = (SELECT MAX(d2.id) FROM review_decision d2 WHERE d2.booking_id = d.booking_id)"
+        )
+        if r["decision"] == "approve"
+    }
+
+
 def flagged_shippers(conn: sqlite3.Connection, include_scores: bool = True) -> dict[int, str]:
     """shipper_id -> reason they are flagged (internal only).
 
@@ -121,12 +133,13 @@ def flagged_shippers(conn: sqlite3.Connection, include_scores: bool = True) -> d
         flagged.setdefault(r["shipper_id"], "A booking was rejected after review")
     if not include_scores:
         return flagged
+    cleared = approved_bookings(conn)
     for r in conn.execute(
-        "SELECT b.shipper_id, r.rule_hits_json FROM risk_score r JOIN booking b ON b.id = r.booking_id "
+        "SELECT b.id, b.shipper_id, r.rule_hits_json FROM risk_score r JOIN booking b ON b.id = r.booking_id "
         "WHERE r.score >= ?",
         (high_min,),
     ):
-        if r["shipper_id"] in flagged:
+        if r["shipper_id"] in flagged or r["id"] in cleared:
             continue
         if base_score(json.loads(r["rule_hits_json"]), graph_ids, cap) >= high_min:
             flagged[r["shipper_id"]] = "Has a HIGH-risk booking on its own evidence"

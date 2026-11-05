@@ -26,6 +26,9 @@ STATIC = Path(__file__).with_name("static")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.model = None
+    # Remember the files' current versions, so the first later change is noticed.
+    for path in _watched_files():
+        _changed(path)
     try:
         app.state.model = anomaly.load()
     except FileNotFoundError:
@@ -54,7 +57,8 @@ async def guard(request: Request, call_next):
     """
     client = request.client.host if request.client else ""
     server = (request.scope.get("server") or ("",))[0]
-    if not request.url.path.startswith(PUBLIC_PREFIXES) and client not in LOCAL_CLIENTS and client != server:
+    local = client in LOCAL_CLIENTS or (bool(client) and client == server)  # unknown client: not local
+    if not request.url.path.startswith(PUBLIC_PREFIXES) and not local:
         return JSONResponse({"detail": "Staff pages are only available on the presenter's laptop."}, status_code=403)
     if request.method not in ("GET", "HEAD", "OPTIONS"):
         origin = request.headers.get("origin")
@@ -79,6 +83,10 @@ def _changed(path: Path) -> bool:
 # ------------------------------------------------------------------ plumbing
 
 
+def _watched_files() -> list[Path]:
+    return [config.config_dir() / n for n in ("rules.yaml", "settings.yaml", "commodities.yaml")] + [config.model_path()]
+
+
 def _refresh_config() -> None:
     """Pick up edits to the YAML config (e.g. after `make train`) without a restart."""
     if any([_changed(config.config_dir() / n) for n in ("rules.yaml", "settings.yaml", "commodities.yaml")]):
@@ -87,7 +95,7 @@ def _refresh_config() -> None:
 
 def get_conn() -> Iterator[sqlite3.Connection]:
     _refresh_config()
-    if not config.db_path().exists():
+    if not db.is_seeded():
         raise HTTPException(503, "No demo database yet. Run `make seed` (or `python -m cargoshield.seed`).")
     conn = db.connect()
     try:
@@ -272,7 +280,8 @@ class NewBooking(BaseModel):
     shipper_id: int
     origin: str = Field(min_length=3, max_length=3)
     destination: str = Field(min_length=3, max_length=3)
-    flight_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    flight_date: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$",
+                                    description="Optional; must match now + lead_time_hours at the origin")
     commodity_text: str = Field(min_length=2, max_length=120)
     pieces: int = Field(ge=1, le=10000)
     weight_kg: float = Field(gt=0, le=150000)
@@ -308,18 +317,38 @@ def api_new_booking(body: NewBooking, request: Request, conn: sqlite3.Connection
         number = awbmod.make(config.awb_prefix(), serial)
     if conn.execute("SELECT 1 FROM booking WHERE awb = ?", (number,)).fetchone():
         raise HTTPException(409, "AWB already exists")
+    # The flight date is where the lead time lands, in the origin's local time.
+    from datetime import date as _date, timedelta as _td, timezone as _tz
+    from zoneinfo import ZoneInfo
+
+    from .seed import AIRPORT_TZ
+
+    now = db.utcnow()
+    departure_local = (now + _td(hours=body.lead_time_hours)).replace(tzinfo=_tz.utc).astimezone(
+        ZoneInfo(AIRPORT_TZ.get(body.origin.upper(), "UTC")))
+    flight_date = departure_local.date()
+    if body.flight_date:
+        try:
+            given = _date.fromisoformat(body.flight_date)
+        except ValueError:
+            raise HTTPException(422, "flight_date is not a real date")
+        if abs((given - flight_date).days) > 1:
+            raise HTTPException(422, f"flight_date {given} doesn't match a departure {body.lead_time_hours:g} hours "
+                                     f"from now ({flight_date})")
     cur = conn.execute(
         "INSERT INTO booking (awb, shipper_id, origin, destination, flight_date, commodity_text, commodity_class, "
         "pieces, weight_kg, volume_m3, declared_value_usd, payment_method, payment_ref, booked_at, lead_time_hours, "
         "status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')",
-        (number, body.shipper_id, body.origin.upper(), body.destination.upper(), body.flight_date,
+        (number, body.shipper_id, body.origin.upper(), body.destination.upper(), flight_date.isoformat(),
          body.commodity_text, commodity.classify(body.commodity_text), body.pieces, body.weight_kg, body.volume_m3,
          body.declared_value_usd, body.payment_method, body.payment_ref, db.iso(db.utcnow()), body.lead_time_hours),
     )
     bid = int(cur.lastrowid)
     graph.add_links_for_booking(conn, body.shipper_id, body.payment_ref)
     conn.commit()
-    risk.screen_booking(conn, bid, model)
+    res = risk.screen_booking(conn, bid, model)
+    if res.band == "HIGH":
+        risk.rescore_after_flag(conn, body.shipper_id, model, skip_booking=bid)
     return _booking_detail(conn, bid, request)
 
 
@@ -328,9 +357,14 @@ def api_simulate(request: Request, conn: sqlite3.Connection = Depends(get_conn),
                  model: anomaly.AnomalyModel = Depends(get_model)) -> dict[str, Any]:
     try:
         bid = simulate.simulate_booking(conn, model)
-    except sqlite3.IntegrityError:  # a reset landed mid-way; the next tick will work
+        r = conn.execute(_BOOKING_LIST_SQL + " WHERE b.id = ?", (bid,)).fetchone()
+        if r is None:
+            raise KeyError(bid)
+    except (sqlite3.IntegrityError, KeyError):  # a reset landed mid-way; the next tick will work
         raise HTTPException(409, "The demo was reset while this booking was being created. Try again.")
-    r = conn.execute(_BOOKING_LIST_SQL + " WHERE b.id = ?", (bid,)).fetchone()
+    if r["band"] == "HIGH":
+        risk.rescore_after_flag(conn, conn.execute("SELECT shipper_id FROM booking WHERE id = ?", (bid,)).fetchone()[0],
+                                model, skip_booking=bid)
     return _list_item(r)
 
 
@@ -360,7 +394,8 @@ class ReviewBody(BaseModel):
 
 
 @app.post("/api/review/{booking_id}")
-def api_review(booking_id: int, body: ReviewBody, conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def api_review(booking_id: int, body: ReviewBody, request: Request,
+               conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     b = conn.execute("SELECT status FROM booking WHERE id = ?", (booking_id,)).fetchone()
     if b is None:
         raise HTTPException(404, "No such booking")
@@ -373,7 +408,12 @@ def api_review(booking_id: int, body: ReviewBody, conn: sqlite3.Connection = Dep
                  (booking_id, body.decision, (body.note or "").strip() or None, body.reviewer, db.iso(db.utcnow())))
     conn.execute("UPDATE booking SET status = ? WHERE id = ?", (status, booking_id))
     conn.commit()
-    return {"booking_id": booking_id, "status": status}
+    rescored = 0
+    if body.decision == "reject":
+        # The shipper is now flagged: their other open bookings and their contacts' change too.
+        shipper_id = conn.execute("SELECT shipper_id FROM booking WHERE id = ?", (booking_id,)).fetchone()[0]
+        rescored = risk.rescore_after_flag(conn, shipper_id, get_model(request), skip_booking=booking_id)
+    return {"booking_id": booking_id, "status": status, "rescored": rescored}
 
 
 # ------------------------------------------------------------------ graph
@@ -504,7 +544,7 @@ def verify_policy(qr_token: str, request: Request, conn: sqlite3.Connection = De
 async def api_chat(request: Request, text: str | None = Form(None), image: UploadFile | None = File(None),
                    conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     data = await image.read(ocr.MAX_UPLOAD_BYTES + 1) if image is not None else None
-    msg = messaging.IncomingMessage(channel="whatsapp-sim", sender="demo-user", text=text, image=data or None,
+    msg = messaging.IncomingMessage(channel="chat-sim", sender="demo-user", text=text, image=data or None,
                                     image_mime=image.content_type if image is not None else None)
     # OCR and QR decoding block for up to a few seconds: keep them off the event loop.
     reply = await run_in_threadpool(messaging.handle_message, conn, msg, trusted_hosts(request))

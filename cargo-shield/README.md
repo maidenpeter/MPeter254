@@ -14,12 +14,13 @@ Everything. There is no connection to any airline system.
 
 | Thing | How it is made |
 |---|---|
-| Airline | "Demo Airline", AWB prefix `999` (a placeholder, set in `config/settings.yaml`) |
-| Routes | `data/routes.csv`: Nairobi, Johannesburg and Hong Kong hubs plus African destinations. Days and times are placeholders. **Refresh this file from the airline's public schedule page before any real pitch.** |
+| Airline | "Demo Airline", AWB prefix `999`, as the brief asked. **Heads-up: 999 is Air China's real cargo prefix**, and cargo people know their prefixes. Change `awb_prefix` in `config/settings.yaml` (to the airline's own prefix once you have permission) before showing anyone in the industry. |
+| Routes | `data/routes.csv`: Nairobi, Johannesburg and Hong Kong hubs plus African destinations. Days and times are placeholders. **Refresh this file from the airline's public schedule page before any real pitch.** Departure times are local to the origin airport; time zones come from a table in `cargoshield/seed.py`, or add a `timezone` column (e.g. `Africa/Nairobi`) for airports it doesn't know. |
 | Shippers (~400) | Invented company names. Emails use the reserved `.example` domain. Phone numbers put a `0` straight after the country code, a form the numbering plans in the demo countries don't issue, so none should reach a real phone. Any resemblance to a real business is chance. |
 | Bookings (3,000) | Generated with fixed random seeds, so the demo is the same every time. About 4% carry a planted risk pattern with a known answer, used to test the engine. |
 | Fraud ring | Five planted shippers sharing a phone, an email and a payer account. |
-| Fake documents | 8 images in `data/fakes/`, drawn with Pillow. Each uses an AWB number that fails the check digit or does not exist. Scam *patterns* only (clearing-fee notes, release stamps, look-alike QR sites). Nothing copied from real forgeries, scam reports or court cases. |
+| Gold and specie | Gold is priced from `reference_prices.gold_usd_per_oz` in `config/commodities.yaml` (USD 3,900, roughly spot on 1 Nov 2026). Check spot before a demo; the HIGH demo booking is 6 kg of gold bars at that price. |
+| Fake documents | 8 images in `data/fakes/`, drawn with Pillow by the seed and dated around the day you seed. Each uses an AWB number that fails the check digit or does not exist. Scam *patterns* only (clearing-fee notes, release stamps, look-alike QR sites). Nothing copied from real forgeries, scam reports or court cases. |
 | Insurance prices | Illustrative. Not real rates and not an offer of insurance. The UI says so. |
 
 The UI carries the label "Demo data built on the public flight schedule". No real airline branding is used.
@@ -30,7 +31,7 @@ You need Python 3.11 or newer.
 
 ```bash
 cd cargo-shield
-python3 -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
+python3 -m venv .venv && source .venv/bin/activate     # Windows: py -3.11 -m venv .venv  then  .venv\Scripts\activate
 make install                                           # or: pip install -r requirements.txt
 ```
 
@@ -42,7 +43,7 @@ Photo reading uses the Tesseract OCR program, installed separately:
 
 Without Tesseract the app still works; when someone sends a photo, the chat asks them to type the number instead. QR codes are read with `zxing-cpp` (a normal pip package, already in requirements).
 
-Then check everything is in place:
+Then check the software is in place (it tells you the demo data isn't generated yet until you run `make demo` or `make seed`):
 
 ```bash
 make doctor
@@ -56,12 +57,12 @@ make doctor
 | `make seed` | Same as `python -m cargoshield.seed --bookings 3000`. Builds a fresh database, writes the fake documents, trains the anomaly model, scores every booking and saves a reset snapshot. Takes about 10 seconds. |
 | `make run` | Start the app on the existing database. |
 | `make reset` | Put the database back to the demo starting state (issued cover, reviews, chat checks and live bookings are cleared). There is also a Reset button in the UI. |
-| `make test` | Run the test suite (about 15 seconds). |
+| `make test` | Run the test suite (about 30 seconds). Tests that need Tesseract or zxing-cpp skip themselves if those are missing. |
 | `make report` | Print how many planted risks the engine caught and the false-positive rate on clean bookings. |
 | `make train` | After editing `config/rules.yaml`: go back to the demo starting state, retrain, rescore and save that as the new starting state (so Reset keeps your tuning). A running app picks up the new rules and model on its next request. |
 | `make doctor` | Pre-flight check. |
 
-No `make` (e.g. Windows)? Use `python -m cargoshield demo`, `python -m cargoshield reset`, `python -m cargoshield test` and so on.
+No `make` (e.g. Windows)? Use `python -m cargoshield demo`, `python -m cargoshield reset`, `python -m cargoshield test` and so on. (The Makefile uses `python` on Windows and `python3` elsewhere.)
 
 To let a phone on the same Wi-Fi scan the QR codes, start with `make demo HOST=0.0.0.0` and open the dashboard on the LAN address it prints. By default the app only listens on the laptop itself. Even on the network, other devices can only reach the public `/verify/...` pages; the dashboard and its API answer only the presenter's laptop, and writes from other websites are refused.
 
@@ -96,7 +97,9 @@ gross premium     = expected loss ÷ (1 − expense loading − profit margin)
 premium           = max(gross premium, minimum premium)
 ```
 
-Money is rounded half-up to the cent at each line, and each line is worked from the line above as shown, so every step can be redone on a calculator; the profit line takes the rounding cent. Cover is only offered before the flight departs, and not when the top-up is under $1,000 (`minimum_sum_insured_usd`), where the $25 minimum premium would be a silly rate.
+Money is rounded half-up to the cent at each line, and each line is worked from the line above as shown, so every step can be redone on a calculator; the profit line takes the rounding cent. Cover is only offered before the flight departs, and not when the top-up is under $1,000 (`minimum_sum_insured_usd`), where the $25 minimum premium would be a silly rate. Cover runs until 30 days after the flight date, then the QR check reads NOT ACTIVE.
+
+A MEDIUM booking still gets a priced quote, but it can't be bought with one click when the shipper isn't KYC-verified or is flagged, when the goods are valuables (specie needs its own wording), or when a fraud-indicator rule fired (`refer_if_rules`). The quote then says it has been referred to an underwriter. The quote and certificate state the basis: cover in excess of the carrier's liability, with no value declared for carriage.
 
 The 26 SDR/kg limit has applied since 28 December 2024 (up from 22). It applies to the actual weight of the packages (Art. 22(4)). Verify it, and the SDR rate, before any real use. Issuing cover creates a random 192-bit token and a QR code that links to `/verify/policy/{token}`.
 
@@ -131,7 +134,7 @@ cargo-shield/
 
 - **Top-up cover leaves a gap.** It pays the difference between declared value and the carrier's liability limit. But the carrier isn't liable for everything (Article 18 defences such as inherent defect, defective packing by someone else, war, or acts of public authority). An all-risks cargo policy that covers full value and recovers from the carrier is the usual design. Worth deciding before a real product.
 - **Prices are placeholders.** Base loss rates, loadings and multipliers are made up. A real rate needs the airline's claims history.
-- **Public verify endpoints can be scraped.** Anyone can try AWB numbers (the check digit cuts guessing by 7x, no more). A pilot needs rate limiting and probably a lighter answer (e.g. route only) for unauthenticated callers.
+- **Public verify endpoints can be scraped.** Anyone can try AWB numbers; the check digit is public, so it slows nobody down. A pilot needs rate limiting and probably a lighter answer (e.g. route only) for unauthenticated callers.
 - **The dashboard has no login.** It is locked to the presenter's laptop, which is fine for a demo and nothing more.
 - **OCR on real phone photos** is weaker than on these clean renders. Glare, folds and handwriting will cause misses; the chat falls back to asking for the number.
 - **Times** are stored as UTC and shown in the browser's local time; route departure times are placeholders. If the schedule has no flight in the next 11 hours when you seed, the HIGH demo booking gets a departure 6 hours out on a route that flies that day, which may not match the timetable.
@@ -144,3 +147,9 @@ cargo-shield/
 - The ODPC's Guidance Note on Cross-border Data Transfers (consulted on in April and May 2026, final version published in September 2026) treats processing personal data in a cloud environment with servers outside Kenya as a cross-border transfer. Backups abroad count too. A real pilot should host in Kenya, or document the legal basis, risk assessment and safeguards for each transfer. Read the guidance note itself before relying on this summary.
 - Verification responses never expose shipper personal data. The dashboard masks phone numbers, emails and payer references even for staff.
 - Flags are internal. Nothing in the system publicly labels anyone a fraudster, and no booking is rejected without a person deciding.
+
+## What the counters mean
+
+- **Sent to review**: bookings that scored HIGH. The small print splits them into waiting now and already decided.
+- **Fakes caught**: documents, photos, QR codes and links that came back NOT FOUND or SUSPICIOUS. A number someone typed doesn't count (a typo isn't a fake), and another airline's AWB reads OTHER AIRLINE, not fake.
+- **Premium written**: the sum of premiums on cover issued, including the pre-loaded history.

@@ -2,6 +2,7 @@
 
 ## Before you walk in
 
+0. Before a real pitch, refresh `data/routes.csv` from the airline's public schedule page and set `awb_prefix` (999 is Air China's real prefix). Until you do, say "built on a placeholder schedule" rather than "the public schedule".
 1. On the day, run `make demo`. It reseeds, so the HIGH booking sits on a flight that hasn't left yet, whatever time you run it.
 2. Open http://localhost:8000 in a full-screen browser window.
 3. Run `make doctor` once. If Tesseract is missing, step 1 still works: the chat will ask for the number, and you type `999-47182030`.
@@ -16,9 +17,9 @@ The AWB numbers below are fixed by the seed, so they are the same on every lapto
 
 ### Opening line (15 seconds)
 
-"Every number on this screen is synthetic, built on the public schedule. CargoShield does three things off one engine: it tells anyone whether paperwork is real, it scores every booking before you accept it, and it sells cover priced from that same score."
+"Every number on this screen is synthetic, built on the public schedule (or "a placeholder schedule", if you haven't refreshed routes.csv). CargoShield does three things off one engine: it tells anyone whether paperwork is real, it scores every booking before you accept it, and it sells cover priced from that same score."
 
-Point at the top strip: bookings screened, flagged for review, policies, premium, fakes caught.
+Point at the top strip: bookings screened, sent to review, policies, premium, fakes caught.
 
 ### Step 1: a fake air waybill (45 seconds)
 
@@ -32,7 +33,7 @@ Optional: click the fake with the look-alike QR code. It comes back SUSPICIOUS b
 
 ### Step 2: a HIGH booking and the ring behind it (60 seconds)
 
-1. Demo path, step **2**. Booking **999-60422180** opens: 6 kg of gold bars, $640,000 declared, score **100, HIGH**.
+1. Demo path, step **2**. Booking **999-60422180** opens: 6 kg of gold bars, about $752,000 declared (6 kg at the gold price in `config/commodities.yaml`), score **100, HIGH**, on a Nairobi flight that hasn't left yet.
 2. Read the reasons, top to bottom:
    - New shipper, 12 days old, booking high-value goods
    - Shares a phone number with a flagged shipper
@@ -48,7 +49,7 @@ If asked what the public sees: verify this AWB in the chat. It says the AWB is g
 ### Step 3: a clean booking, cover, and the QR (60 seconds)
 
 1. Demo path, step **3**. Booking **999-31509461** opens: 420 kg of pharmaceuticals, NBO to Lusaka, $68,500 declared, score **0, LOW**. No connections.
-2. Scroll to **Cover**. Walk the quote: carrier liability (420 kg × 26 SDR × 1.36), sum insured $53,648.80, expected loss, loadings, premium **$330.15**. "Illustrative pricing; an actuary can follow every line."
+2. Scroll to **Cover**. Walk the quote: carrier liability (420 kg × 26 SDR × 1.36), sum insured $53,648.80, expected loss, loadings, premium **$330.15**. "Illustrative pricing; an actuary can follow every line." The basis line under it says what the cover is: the value above the carrier's liability.
 3. Click **Issue cover**. A policy number and a QR code appear, and a message confirms the new Policies and Premium totals (the counters behind the drawer go up too).
 4. Click **Scan the QR**. A phone-sized page opens: **GENUINE**, cover active, AWB, route and sum insured. No shipper details.
 

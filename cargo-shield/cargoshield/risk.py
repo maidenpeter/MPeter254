@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any, Mapping, Sequence
 
 from . import config, db, graph
@@ -170,10 +171,12 @@ def combine(hits: Sequence[RuleHit], anomaly: Mapping[str, Any] | None) -> RiskR
         hit_rows.append({"id": "anomaly_model", "points": pts, "kind": "model",
                          "percentile": round(pct, 4), "driver": anomaly.get("driver")})
         if pts:
+            how = ("among the most unusual 1% of past bookings" if pct >= 0.99
+                   else f"more unusual than {pct:.0%} of past bookings")
             reasons.append({
                 "rule_id": "anomaly_model",
-                "text": (f"Unusual compared with past bookings: more unusual than {pct:.0%} of them, "
-                         f"mostly because of the {anomaly['driver_label']}. Supporting signal only."),
+                "text": (f"Unusual pattern: {how}, mostly because of the {anomaly['driver_label']}. "
+                         "Supporting signal only."),
                 "points": pts,
                 "kind": "model",
             })
@@ -232,17 +235,24 @@ def score_all(conn: sqlite3.Connection, model: AnomalyModel) -> dict[str, Any]:
     # Start from facts only (watchlist, reviewer rejections), never from old scores,
     # so rescoring after a rules.yaml change gives the same answer every time.
     flagged = set(graph.flagged_shippers(conn, include_scores=False))
+    cleared = graph.approved_bookings(conn)  # a person reviewed these and let them fly
+    high_own: dict[int, set[int]] = {}
     for r, f, an in zip(rows, base_feats, anomalies):
+        if r["id"] in cleared:
+            continue
         if combine(evaluate(rules, f, skip=graph_ids), an).score >= high_min:
             flagged.add(r["shipper_id"])
+            high_own.setdefault(r["shipper_id"], set()).add(r["id"])
+    rejected = _rejected_by_shipper(conn)
 
-    # Pass 2: add links to flagged shippers.
+    # Pass 2: add what the network and the shipper's other bookings say.
     idx = graph.LinkIndex(conn)
     when = db.iso(db.utcnow())
     counts = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
     for r, an in zip(rows, anomalies):
         linked = idx.linked_flagged(r["shipper_id"], flagged)
-        f = booking_features(r, _shipper_of(r), model.route_freq, linked)
+        other = _other_flag(r["id"], high_own.get(r["shipper_id"], set()), rejected.get(r["shipper_id"], set()))
+        f = booking_features(r, _shipper_of(r), model.route_freq, linked, other)
         res = combine(evaluate(rules, f), an)
         _write(conn, r["id"], res, when)
         _set_status(conn, r["id"], res.band)
@@ -259,7 +269,9 @@ def screen_booking(conn: sqlite3.Connection, booking_id: int, model: AnomalyMode
         raise KeyError(booking_id)
     flagged = set(graph.flagged_shippers(conn))
     linked = graph.LinkIndex(conn).linked_flagged(row["shipper_id"], flagged)
-    f = booking_features(row, _shipper_of(row), model.route_freq, linked)
+    other = _other_flag(booking_id, _high_own_from_scores(conn, row["shipper_id"]),
+                        _rejected_by_shipper(conn).get(row["shipper_id"], set()))
+    f = booking_features(row, _shipper_of(row), model.route_freq, linked, other)
     an = model.score([f])[0]
     res = combine(evaluate(rules, f), an)
     res.features = f
@@ -267,6 +279,68 @@ def screen_booking(conn: sqlite3.Connection, booking_id: int, model: AnomalyMode
     _set_status(conn, booking_id, res.band)
     conn.commit()
     return res
+
+
+def _rejected_by_shipper(conn: sqlite3.Connection) -> dict[int, set[int]]:
+    out: dict[int, set[int]] = {}
+    for r in conn.execute(
+        "SELECT b.shipper_id, b.id FROM review_decision d JOIN booking b ON b.id = d.booking_id WHERE d.decision = 'reject'"
+    ):
+        out.setdefault(r["shipper_id"], set()).add(r["id"])
+    return out
+
+
+def _high_own_from_scores(conn: sqlite3.Connection, shipper_id: int) -> set[int]:
+    """The shipper's bookings that score HIGH on their own evidence (stored scores)."""
+    rcfg = config.rules_config()
+    graph_ids = set(rcfg.get("graph_rules") or [])
+    cap = int(rcfg["anomaly"]["max_score_without_rule_hit"])
+    high_min = int(rcfg["bands"]["HIGH"][0])
+    out = set()
+    cleared = graph.approved_bookings(conn)
+    for r in conn.execute(
+        "SELECT b.id, r.rule_hits_json FROM booking b JOIN risk_score r ON r.booking_id = b.id WHERE b.shipper_id = ?",
+        (shipper_id,),
+    ):
+        if r["id"] not in cleared and graph.base_score(json.loads(r["rule_hits_json"]), graph_ids, cap) >= high_min:
+            out.add(r["id"])
+    return out
+
+
+def _other_flag(booking_id: int, high_own: set[int], rejected: set[int]) -> str | None:
+    """What the shipper's *other* bookings say (never this booking itself)."""
+    if rejected - {booking_id}:
+        return "another booking that was rejected after review"
+    if high_own - {booking_id}:
+        return "another booking that scored HIGH"
+    return None
+
+
+def rescore_after_flag(conn: sqlite3.Connection, shipper_id: int, model: AnomalyModel,
+                       skip_booking: int | None = None) -> int:
+    """A shipper has just been flagged (a HIGH booking, or a reviewer's reject).
+
+    Rescore the open bookings that the new flag affects: the shipper's own other
+    bookings and those of every shipper sharing a phone, email or payer account
+    with them. Only bookings nobody has decided on yet and whose flight is still
+    to go. Returns how many were rescored.
+    """
+    idx = graph.LinkIndex(conn)
+    shippers = {shipper_id} | set(idx.neighbours(shipper_id))
+    now = db.utcnow()
+    n = 0
+    for r in conn.execute(
+        f"SELECT b.id, b.booked_at, b.lead_time_hours FROM booking b WHERE b.shipper_id IN "
+        f"({','.join('?' for _ in shippers)}) AND NOT EXISTS (SELECT 1 FROM review_decision d WHERE d.booking_id = b.id)",
+        sorted(shippers),
+    ).fetchall():
+        if r["id"] == skip_booking:
+            continue
+        if db.parse_dt(r["booked_at"]) + timedelta(hours=r["lead_time_hours"]) <= now:
+            continue
+        screen_booking(conn, r["id"], model)
+        n += 1
+    return n
 
 
 def explain(conn: sqlite3.Connection, booking_id: int) -> dict[str, Any] | None:

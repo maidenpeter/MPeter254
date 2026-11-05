@@ -96,6 +96,7 @@ CREATE INDEX IF NOT EXISTS idx_booking_shipper   ON booking (shipper_id);
 CREATE INDEX IF NOT EXISTS idx_booking_booked_at ON booking (booked_at);
 CREATE INDEX IF NOT EXISTS idx_risk_band         ON risk_score (band);
 CREATE INDEX IF NOT EXISTS idx_policy_booking    ON policy (booking_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_active_booking ON policy (booking_id) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_verif_checked     ON verification_log (checked_at);
 CREATE INDEX IF NOT EXISTS idx_link_b            ON contact_link (b_type, b_value);
 CREATE INDEX IF NOT EXISTS idx_review_booking    ON review_decision (booking_id);

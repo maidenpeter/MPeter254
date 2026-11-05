@@ -16,15 +16,18 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import random
 import secrets
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from faker import Faker
 
@@ -96,31 +99,72 @@ PLANTED_PATTERNS = (
 )
 
 
+# Time zone of each airport, so the local departure times in routes.csv become
+# real moments. Add a row here (or a "timezone" column in routes.csv) for any
+# airport a refreshed schedule brings in; unknown airports fall back to UTC.
+AIRPORT_TZ = {
+    "NBO": "Africa/Nairobi", "JNB": "Africa/Johannesburg", "HKG": "Asia/Hong_Kong",
+    "LOS": "Africa/Lagos", "ACC": "Africa/Accra", "EBB": "Africa/Kampala",
+    "DAR": "Africa/Dar_es_Salaam", "KGL": "Africa/Kigali", "FIH": "Africa/Kinshasa",
+    "LUN": "Africa/Lusaka", "HRE": "Africa/Harare", "ADD": "Africa/Addis_Ababa",
+    "DXB": "Asia/Dubai", "DOH": "Asia/Qatar", "AMS": "Europe/Amsterdam", "LHR": "Europe/London",
+    "LGG": "Europe/Brussels", "CDG": "Europe/Paris", "MBA": "Africa/Nairobi", "KIS": "Africa/Nairobi",
+    "MRU": "Indian/Mauritius", "CPT": "Africa/Johannesburg", "BOM": "Asia/Kolkata", "CAN": "Asia/Shanghai",
+    "PVG": "Asia/Shanghai", "BKK": "Asia/Bangkok", "SIN": "Asia/Singapore", "JED": "Asia/Riyadh",
+}
+
+
+def _zone(name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return ZoneInfo("UTC")
+
+
 @dataclass(frozen=True)
 class Route:
+    """A scheduled route. `departure` is the local time at the origin airport.
+
+    All datetimes going in and out are naive UTC, like everything else stored.
+    """
+
     origin: str
     destination: str
-    days: frozenset
+    days: frozenset  # local weekdays, Monday = 0
     departure: time
+    tz: str = "UTC"
 
     @property
     def key(self) -> str:
         return f"{self.origin}-{self.destination}"
 
+    def _utc(self, local_day: date) -> datetime:
+        local = datetime.combine(local_day, self.departure, tzinfo=_zone(self.tz))
+        return local.astimezone(timezone.utc).replace(tzinfo=None)
+
+    def local_date(self, dep_utc: datetime) -> date:
+        """The flight date as printed on the AWB: the local date at the origin."""
+        return dep_utc.replace(tzinfo=timezone.utc).astimezone(_zone(self.tz)).date()
+
+    def flies_on(self, dep_utc: datetime) -> bool:
+        return self.local_date(dep_utc).weekday() in self.days
+
     def next_departure(self, after: datetime) -> datetime:
-        for i in range(0, 9):
-            day = (after + timedelta(days=i)).date()
+        start = self.local_date(after)
+        for i in range(-1, 9):
+            day = start + timedelta(days=i)
             if day.weekday() in self.days:
-                dt = datetime.combine(day, self.departure)
+                dt = self._utc(day)
                 if dt >= after:
                     return dt
         raise RuntimeError(f"route {self.key} has no departures")
 
     def prev_departure(self, before: datetime) -> datetime:
-        for i in range(0, 9):
-            day = (before - timedelta(days=i)).date()
+        start = self.local_date(before)
+        for i in range(-1, 9):
+            day = start - timedelta(days=i)
             if day.weekday() in self.days:
-                dt = datetime.combine(day, self.departure)
+                dt = self._utc(day)
                 if dt <= before:
                     return dt
         raise RuntimeError(f"route {self.key} has no departures")
@@ -136,11 +180,19 @@ def load_routes(path: str | Path | None = None) -> list[Route]:
             else:
                 days = frozenset(DAYS[d.strip()[:3].title()] for d in raw_days.split("|") if d.strip())
             hh, mm = (row.get("departure_local") or "12:00").split(":")
-            routes.append(Route(row["origin"].strip().upper(), row["destination"].strip().upper(),
-                                days, time(int(hh), int(mm))))
+            origin = row["origin"].strip().upper()
+            tz = (row.get("timezone") or "").strip() or AIRPORT_TZ.get(origin, "UTC")
+            routes.append(Route(origin, row["destination"].strip().upper(), days, time(int(hh), int(mm)), tz))
     if not routes:
         raise ValueError("routes.csv has no routes")
     return routes
+
+
+TROY_OZ_PER_KG = 32.1507
+
+
+def gold_usd_per_kg() -> float:
+    return float(config.commodities()["reference_prices"]["gold_usd_per_oz"]) * TROY_OZ_PER_KG
 
 
 class Generator:
@@ -246,6 +298,18 @@ class Generator:
                 return self.rng.choice(preferred)
         return self.rng.choice(options)
 
+    def valuables_vpk(self, text: str) -> float:
+        """Declared value per kg for valuables, by description (gold follows the spot price)."""
+        spec = self.cls_cfg["valuables"].get("priced_by_description", {}).get(text)
+        if not spec:
+            lo, hi = self.cls_cfg["valuables"]["value_per_kg"]
+            return self.log_uniform(lo, hi, skew=0.5)
+        if "gold_spot_share" in spec:
+            lo, hi = spec["gold_spot_share"]
+            return gold_usd_per_kg() * self.rng.uniform(lo, hi)
+        lo, hi = spec["usd_per_kg"]
+        return self.log_uniform(lo, hi, skew=0.5)
+
     def log_uniform(self, lo: float, hi: float, skew: float = 0.35) -> float:
         a, b = math.log(lo), math.log(hi)
         return math.exp(self.rng.triangular(a, b, a + skew * (b - a)))
@@ -342,7 +406,7 @@ class Generator:
             "_shipper": shipper,
             "origin": route.origin,
             "destination": route.destination,
-            "flight_date": dep.date().isoformat(),
+            "flight_date": route.local_date(dep).isoformat(),
             "commodity_text": text,
             **phys,
             "payment_method": payment,
@@ -368,6 +432,8 @@ class Generator:
             # Ordinary small shipments with vague wording. Harmless noise.
             text = self.rng.choice(["Personal effects", "Samples", "Assorted items"])
             phys = self._physical(cls, weight=self.rng.uniform(5, 60), vpk=self.rng.uniform(4, 25))
+        if phys is None and cls == "valuables":
+            phys = self._physical(cls, vpk=self.valuables_vpk(text))
         phys = phys or self._physical(cls)
         route = self.route_from(shipper["_hub"])
         lead = None
@@ -377,33 +443,35 @@ class Generator:
         return self.booking(shipper, cls, text, route, phys, self.clean_payment(shipper), booked, dep)
 
 
-def pick_hero_flight(g: Generator) -> tuple[Route, datetime, datetime]:
+def pick_hero_flight(g: Generator, home: str = "NBO") -> tuple[Route, datetime, datetime]:
     """Flight for the demo's HIGH booking: (route, departure, booked_at).
 
-    The story is "caught before the plane left", so the flight must still be in
-    the future, booked a few hours out (under the 12-hour rule), and never booked
-    in the future. Prefer the next scheduled departure within 11 hours, ideally
-    Nairobi to Hong Kong or Johannesburg. If the schedule has nothing that soon
-    (e.g. a quiet Saturday afternoon), use a route that flies today and set the
-    departure 6 hours out; only the departure time is then off-schedule, which
-    nothing on screen shows.
+    The story is a new Nairobi shipper sending gold, "caught before the plane
+    left". So the flight leaves from `home`, is still in the future, was booked a
+    few hours out (under the 12-hour rule), and was never booked in the future.
+    Prefer the next scheduled departure from home within 11 hours, ideally to
+    Hong Kong or Johannesburg. If home has nothing that soon (e.g. a quiet
+    Thursday), use a home route that flies today and set the departure 6 hours
+    out; only the departure time is then off-schedule, which nothing on screen
+    shows. Other airports are a last resort for a refreshed schedule without home.
     """
     soonest = g.anchor + timedelta(hours=1)
     latest = g.anchor + timedelta(hours=11)
-    candidates = [(r.next_departure(soonest), r) for r in g.routes]
-    candidates = [(d, r) for d, r in candidates if d <= latest]
-    if candidates:
-        def preference(c):
-            d, r = c
-            return (r.origin != "NBO", r.destination not in ("HKG", "JNB"), abs((d - g.anchor).total_seconds() / 3600 - 5))
-        dep, route = min(candidates, key=preference)
-        booked = min(dep - timedelta(hours=7), g.anchor - timedelta(minutes=30))
-        return route, dep, booked
-    dep = g.anchor + timedelta(hours=6)
-    flying = [r for r in g.routes if dep.weekday() in r.days]
-    if flying:
-        route = next((r for r in flying if r.origin == "NBO"), flying[0])
-        return route, dep, dep - timedelta(hours=7)
+    for pool in ([r for r in g.routes if r.origin == home], g.routes):
+        candidates = [(r.next_departure(soonest), r) for r in pool]
+        candidates = [(d, r) for d, r in candidates if d <= latest]
+        if candidates:
+            def preference(c):
+                d, r = c
+                return (r.destination not in ("HKG", "JNB"), abs((d - g.anchor).total_seconds() / 3600 - 5))
+            dep, route = min(candidates, key=preference)
+            booked = min(dep - timedelta(hours=7), g.anchor - timedelta(minutes=30))
+            return route, dep, booked
+        dep = g.anchor + timedelta(hours=6)
+        flying = [r for r in pool if r.flies_on(dep)]
+        if flying:
+            route = min(flying, key=lambda r: r.destination not in ("HKG", "JNB"))
+            return route, dep, dep - timedelta(hours=7)
     route = g.routes[0]  # degenerate schedule: take the next departure whatever it is
     dep = route.next_departure(soonest)
     return route, dep, g.anchor - timedelta(minutes=30)
@@ -448,9 +516,10 @@ def generate(conn, n_bookings: int, n_shippers: int, seed: int, planted_fraction
     shippers.extend(ring)
 
     # Hero HIGH booking: new shipper, gold, booked 7 hours out, cash.
+    hero_value = float(round(6.0 * gold_usd_per_kg(), -3))  # 6 kg at the configured gold spot price
     hero = g.booking(r1, "valuables", "Gold bars", hero_route,
                      {"commodity_class": "valuables", "weight_kg": 6.0, "volume_m3": 0.002, "pieces": 2,
-                      "declared_value_usd": 640000.0},
+                      "declared_value_usd": hero_value},
                      "cash", hero_booked, hero_dep, serial7=HERO_HIGH_SERIAL)
     hero["_patterns"] = ["new_shipper_high_value", "late_booking_risky_payment", "shared_contact_flagged"]
     bookings.append(hero)
@@ -520,8 +589,9 @@ def generate(conn, n_bookings: int, n_shippers: int, seed: int, planted_fraction
                     created = db.parse_dt(s["created_at"])
                     rt = g.route_from(s["_hub"], ["HKG", "JNB"] if s["_cls"] == "valuables" else ["NBO", "JNB"])
                     cls = s["_cls"]
-                    text = rng.choice(g.cls_cfg[cls]["descriptions"])
-                    phys = (g._physical(cls, weight=rng.uniform(2, 28), vpk=rng.uniform(40000, 110000))
+                    choices = list(g.cls_cfg[cls]["descriptions"]) + list(g.cls_cfg[cls].get("descriptions_planted_extra", []))
+                    text = rng.choice(choices)
+                    phys = (g._physical(cls, weight=rng.uniform(2, 28), vpk=g.valuables_vpk(text))
                             if cls == "valuables" else
                             g._physical(cls, weight=rng.uniform(60, 500), vpk=rng.uniform(300, 1200)))
                     window_end = min(created + timedelta(days=27), g.anchor - timedelta(minutes=30))
@@ -643,13 +713,74 @@ def commodity_cfg_vague() -> list[str]:
 
 # ---------------------------------------------------------------- history
 
+REJECT_NOTES = {
+    "linked_to_flagged_shipper": "Shares contact details with a shipper already under review. Not accepted.",
+    "watchlist_shipper": "Shipper is on the internal watchlist. Not accepted.",
+    "new_shipper_high_value": "New account could not show proof of ownership for the goods. Not accepted.",
+    "late_booking_risky_payment": "Payer could not be identified before cut-off. Booking cancelled.",
+    "vague_description_dense": "Contents did not match the declaration at acceptance. Refused.",
+    "vague_description_high_value": "Shipper could not describe the goods or show an invoice. Not accepted.",
+    "weight_volume_mismatch": "Contents did not match the declaration at acceptance. Refused.",
+    "implausible_weight": "Contents did not match the declaration at acceptance. Refused.",
+}
+APPROVE_NOTES = {
+    "new_shipper_high_value": "New importer: invoice and import permit checked, shipper visited. Fine to fly.",
+    "default": "Called the shipper and checked the invoice. Fine to fly.",
+}
+
+
+def backfill_past_reviews(conn, now: datetime, rng: random.Random | None = None) -> int:
+    """Give HIGH bookings whose flights left before `now` the decision a person
+    made at the time, so the live review queue only holds flights still to go.
+
+    This is seed tooling, not the engine: it knows which bookings were planted
+    and decides the way a careful reviewer would have. Notes follow the rules
+    that fired on each booking.
+    """
+    rng = rng or random.Random(0)
+    rows = conn.execute(
+        """
+        SELECT b.id, b.booked_at, b.lead_time_hours, r.rule_hits_json,
+               EXISTS (SELECT 1 FROM seed_truth t WHERE t.booking_id = b.id) AS planted
+        FROM booking b JOIN risk_score r ON r.booking_id = b.id
+        WHERE b.status = 'in_review'
+        """
+    ).fetchall()
+    n = 0
+    for row in rows:
+        booked = db.parse_dt(row["booked_at"])
+        departure = booked + timedelta(hours=row["lead_time_hours"])
+        if departure > now:
+            continue  # still to fly: stays in the live review queue
+        hits = [h["id"] for h in json.loads(row["rule_hits_json"]) if h.get("kind") == "rule"]
+        decided = booked + timedelta(hours=min(row["lead_time_hours"] * rng.uniform(0.2, 0.7), 6))
+        if row["planted"]:
+            decision = "reject"
+            note = next((REJECT_NOTES[h] for h in hits if h in REJECT_NOTES),
+                        "Could not verify the shipper before cut-off. Not accepted.")
+        else:
+            decision = "approve"
+            note = next((APPROVE_NOTES[h] for h in hits if h in APPROVE_NOTES), APPROVE_NOTES["default"])
+        conn.execute(
+            "INSERT INTO review_decision (booking_id, decision, note, decided_by, decided_at) VALUES (?, ?, ?, ?, ?)",
+            (row["id"], decision, note, "Cargo security desk", db.iso(decided)))
+        conn.execute("UPDATE booking SET status = ? WHERE id = ?",
+                     ("rejected" if decision == "reject" else "accepted", row["id"]))
+        n += 1
+    conn.commit()
+    return n
+
+
 
 def seed_history(conn, summary: dict[str, Any], seed: int, policy_share: float, n_checks: int) -> None:
     """Pre-load past policies and verification checks so the dashboard has a past."""
-    from . import pricing  # local import: pricing depends on risk output
+    from . import policies  # local import: pricing depends on risk output
+
+    from . import graph
 
     rng = random.Random(seed + 7)
     anchor = db.parse_dt(summary["anchor"])
+    flagged = set(graph.flagged_shippers(conn))
     rows = conn.execute(
         """
         SELECT b.*, r.band FROM booking b
@@ -664,13 +795,13 @@ def seed_history(conn, summary: dict[str, Any], seed: int, policy_share: float, 
     for row in rows:
         if db.parse_dt(row["booked_at"]) > anchor - timedelta(days=1) or rng.random() > policy_share:
             continue
-        q = pricing.quote_for_row(row, row["band"])  # priced as at booking time, before departure
-        if not q.eligible:
-            continue
         booked = db.parse_dt(row["booked_at"])
         departure = booked + timedelta(hours=row["lead_time_hours"])
         issued_at = min(booked + timedelta(minutes=rng.uniform(5, 360)), departure - timedelta(minutes=20))
         if issued_at <= booked:
+            continue
+        q = policies.quote_booking(conn, row["id"], as_of=issued_at, flagged=flagged)  # dashboard rules, then
+        if not q.bindable:
             continue
         conn.execute(
             "INSERT INTO policy (booking_id, sum_insured_usd, premium_usd, status, qr_token, issued_at) "
@@ -682,44 +813,14 @@ def seed_history(conn, summary: dict[str, Any], seed: int, policy_share: float, 
     # Past review decisions: HIGH bookings whose flights have already gone were
     # decided by a person at the time, so the live queue only holds current work.
     # (The seed knows which bookings it planted; the reviewers' calls follow that.)
-    reject_notes = [
-        "Shipper could not show proof of ownership for the goods. Not accepted.",
-        "Contact details match a watchlisted shipper. Not accepted.",
-        "Contents did not match the declaration at acceptance. Refused.",
-        "Payer refused to identify themselves. Booking cancelled.",
-    ]
-    approve_notes = [
-        "Called the shipper and checked the invoice. Fine to fly.",
-        "New account, documents verified in person. Approved.",
-    ]
-    past_high = conn.execute(
-        """
-        SELECT b.id, b.booked_at, b.lead_time_hours,
-               EXISTS (SELECT 1 FROM seed_truth t WHERE t.booking_id = b.id) AS planted
-        FROM booking b JOIN risk_score r ON r.booking_id = b.id
-        WHERE b.status = 'in_review'
-        """
-    ).fetchall()
-    for row in past_high:
-        booked = db.parse_dt(row["booked_at"])
-        departure = booked + timedelta(hours=row["lead_time_hours"])
-        if departure > anchor:
-            continue  # still to fly: stays in the live review queue
-        decided = booked + timedelta(hours=min(row["lead_time_hours"] * rng.uniform(0.2, 0.7), 6))
-        decision, note = (("reject", rng.choice(reject_notes)) if row["planted"]
-                          else ("approve", rng.choice(approve_notes)))
-        conn.execute(
-            "INSERT INTO review_decision (booking_id, decision, note, decided_by, decided_at) VALUES (?, ?, ?, ?, ?)",
-            (row["id"], decision, note, "Cargo security desk", db.iso(decided)))
-        conn.execute("UPDATE booking SET status = ? WHERE id = ?",
-                     ("rejected" if decision == "reject" else "accepted", row["id"]))
+    backfill_past_reviews(conn, anchor, rng)
 
     awbs = [r["awb"] for r in conn.execute("SELECT awb FROM booking").fetchall()]
     prefix = config.awb_prefix()
     reserved = set(fakes.RESERVED_SERIALS) | {a[3:10] for a in awbs}
     for _ in range(n_checks):
         when = anchor - timedelta(minutes=rng.uniform(30, 60 * 24 * 30))
-        channel = rng.choices(["whatsapp", "web", "api"], weights=[0.6, 0.25, 0.15])[0]
+        channel = rng.choices(["chat", "web", "api"], weights=[0.6, 0.25, 0.15])[0]
         u = rng.random()
         if u < 0.80:
             a = rng.choice(awbs)
@@ -733,11 +834,11 @@ def seed_history(conn, summary: dict[str, Any], seed: int, policy_share: float, 
                     break
             conn.execute(
                 "INSERT INTO verification_log (channel, input_type, input_value, result, checked_at) VALUES (?, ?, ?, 'NOT FOUND', ?)",
-                (channel, rng.choice(["text", "image"]), awbmod.fmt(awbmod.make(prefix, s7)), db.iso(when)))
+                (channel, rng.choice(["image", "image", "text"]), awbmod.fmt(awbmod.make(prefix, s7)), db.iso(when)))
         elif u < 0.93:
             conn.execute(
                 "INSERT INTO verification_log (channel, input_type, input_value, result, checked_at) VALUES (?, 'text', ?, 'INVALID FORMAT', ?)",
-                (channel, f"{prefix}-{rng.randint(100000, 9999999)}", db.iso(when)))
+                (channel, f"unrecognised input ({rng.randint(6, 10)} digits)", db.iso(when)))
         else:
             s7 = str(rng.randint(1_000_000, 9_999_999))
             conn.execute(
@@ -786,8 +887,13 @@ def run(n_bookings: int | None = None, n_shippers: int | None = None, seed: int 
     seed = cfg["random_seed"] if seed is None else seed
     anchor = anchor or db.utcnow()
 
-    path = config.db_path()
+    live = config.db_path()
+    path = live.with_name(live.name + ".building")
     for p in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
+        if p.exists():
+            p.unlink()
+    # A reseed replaces the reset snapshot and the model; never let a stale pair outlive it.
+    for p in (config.snapshot_path(), config.model_path()):
         if p.exists():
             p.unlink()
     conn = db.connect(path)
@@ -797,7 +903,7 @@ def run(n_bookings: int | None = None, n_shippers: int | None = None, seed: int 
 
     from . import graph
     graph.rebuild_links(conn)
-    summary["fakes"] = [p.name for p in fakes.generate()]
+    summary["fakes"] = [p.name for p in fakes.generate(anchor=anchor)]
 
     if score:
         from . import anomaly, evaluation, risk
@@ -811,6 +917,7 @@ def run(n_bookings: int | None = None, n_shippers: int | None = None, seed: int 
         summary["samples"] = write_samples(conn, summary)
 
     db.set_meta(conn, "seeded_at", db.iso(db.utcnow()))
+    db.set_meta(conn, "anchor", db.iso(anchor))
     db.set_meta(conn, "seed_max_booking_id",
                 conn.execute("SELECT MAX(id) FROM booking").fetchone()[0])
     if score:
@@ -826,9 +933,16 @@ def run(n_bookings: int | None = None, n_shippers: int | None = None, seed: int 
         "samples": summary.get("samples", []),
     })
     conn.commit()
-    if score:
-        db.snapshot(conn)
+    # Copy into the live file with the backup API: works while the app holds it
+    # open (Windows will not let us delete it then), and readers see a whole database.
+    db.copy_database(conn, live)
     conn.close()
+    for p in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
+        if p.exists():
+            p.unlink()
+    if score:
+        with db.connect(live) as c:
+            db.snapshot(c)
 
     if not quiet:
         _print_summary(summary)

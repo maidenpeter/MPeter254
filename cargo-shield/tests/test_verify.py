@@ -40,7 +40,7 @@ def test_not_found_and_invalid_format(conn):
     assert verify.check_awb(conn, "999-12345676").result == verify.INVALID  # bad check digit, typed
     assert verify.check_awb(conn, "999-12345676", from_document=True).result == verify.SUSPICIOUS
     other_airline = awb.make("176", "1234567")
-    assert verify.check_awb(conn, other_airline).result == verify.NOT_FOUND
+    assert verify.check_awb(conn, other_airline).result == verify.OTHER_AIRLINE
 
 
 def test_every_check_is_logged(conn):
@@ -60,8 +60,14 @@ def test_policy_token_verification(conn):
     assert verify.check_policy_token(conn, p["qr_token"][:-2] + "zz").result == verify.NOT_FOUND
 
 
+needs_qr = pytest.mark.skipif(not ocr.qr_available(), reason="zxing-cpp not installed")
+
+
 @needs_ocr
-@pytest.mark.parametrize("spec", fakes.FAKES, ids=lambda s: s.filename)
+@pytest.mark.parametrize("spec", [
+    pytest.param(f, marks=needs_qr if f.filename == "fake_cert_lookalike_qr.png" else (), id=f.filename)
+    for f in fakes.FAKES
+])
 def test_every_fake_document_is_caught(conn, spec):
     data = (config.fakes_dir() / spec.filename).read_bytes()
     res = verify.verify_image(conn, data, channel="test", trusted_hosts={"localhost", "testserver"})

@@ -18,8 +18,6 @@ import socket
 import subprocess
 import sys
 
-from . import config
-
 
 def _lan_ip() -> str | None:
     try:
@@ -30,6 +28,15 @@ def _lan_ip() -> str | None:
         return ip if not ip.startswith("127.") else None
     except OSError:
         return None
+
+
+def _not_seeded() -> bool:
+    from . import db
+
+    if db.is_seeded():
+        return False
+    print("No demo database yet. Run `make seed` (or `python -m cargoshield seed`) first.")
+    return True
 
 
 def cmd_seed(args) -> int:
@@ -43,14 +50,20 @@ def cmd_train(args) -> int:
     """Retrain and rescore from the demo starting state, then make that the new
     starting state, so Reset keeps the tuned rules. A running app picks up the
     new model and rules on its next request."""
-    from . import anomaly, db, evaluation, risk
+    from . import anomaly, config, db, evaluation, risk, seed
 
+    if _not_seeded():
+        return 1
     if config.snapshot_path().exists():
         db.restore()
     conn = db.connect()
     model = anomaly.train(conn)
     anomaly.save(model)
     risk.score_all(conn, model)
+    # New rules can send already-departed flights to review; give them the decision a
+    # reviewer would have made at the time (as the seed does), then score once more.
+    if seed.backfill_past_reviews(conn, db.utcnow()):
+        risk.score_all(conn, model)
     db.snapshot(conn)
     print(evaluation.format_report(evaluation.engine_report(conn)))
     print("Saved as the new demo starting state (what Reset restores).")
@@ -61,10 +74,12 @@ def cmd_train(args) -> int:
 def cmd_run(args) -> int:
     import uvicorn
 
+    from . import config, db
+
     srv = config.settings()["server"]
     host = args.host or srv["host"]
     port = args.port or int(srv["port"])
-    if not config.db_path().exists():
+    if not db.is_seeded():
         print("No demo database yet, seeding first...")
         cmd_seed(argparse.Namespace(bookings=None, shippers=None, seed=None))
     print(f"\nCargoShield is starting on http://localhost:{port}")
@@ -85,7 +100,7 @@ def cmd_demo(args) -> int:
 
 
 def cmd_reset(args) -> int:
-    from . import db
+    from . import config, db
 
     try:
         db.restore()
@@ -99,6 +114,8 @@ def cmd_reset(args) -> int:
 def cmd_report(args) -> int:
     from . import db, evaluation
 
+    if _not_seeded():
+        return 1
     conn = db.connect()
     print(evaluation.format_report(evaluation.engine_report(conn)))
     conn.close()
@@ -117,13 +134,17 @@ def cmd_doctor(args) -> int:
     line(sys.version_info >= (3, 11), f"Python {sys.version.split()[0]}", "Python 3.11 or newer is required")
     for mod, pip_name in [("fastapi", "fastapi"), ("uvicorn", "uvicorn"), ("multipart", "python-multipart"),
                           ("yaml", "pyyaml"), ("sklearn", "scikit-learn"), ("faker", "faker"),
-                          ("qrcode", "qrcode"), ("PIL", "pillow"), ("pytesseract", "pytesseract")]:
+                          ("qrcode", "qrcode"), ("PIL", "pillow"), ("pytesseract", "pytesseract"),
+                          ("zoneinfo", "tzdata")]:
         try:
             importlib.import_module(mod)
             line(True, f"{pip_name} installed")
         except ImportError:
             line(False, f"{pip_name} missing", "pip install -r requirements.txt")
-    from . import ocr
+    if not ok:
+        print("Install the missing packages, then run doctor again.")
+        return 1
+    from . import config, db, ocr
 
     tess = ocr.tesseract_available()
     print(f"  [{'ok' if tess else '--'}] Tesseract OCR " + ("found" if tess else
@@ -132,14 +153,21 @@ def cmd_doctor(args) -> int:
     qr = ocr.qr_available()
     print(f"  [{'ok' if qr else '--'}] QR decoding " + ("available" if qr else
           "unavailable (pip install zxing-cpp). The certificate can still be checked by its AWB number."))
-    line(config.db_path().exists(), "Demo database present", "run: make seed")
-    line(config.model_path().exists(), "Anomaly model present", "run: make seed")
-    line(config.snapshot_path().exists(), "Reset snapshot present", "run: make seed")
-    print("Ready for the demo." if ok else "Fix the items marked !! before the demo.")
+    ready = db.is_seeded() and config.model_path().exists() and config.snapshot_path().exists()
+    print(f"  [{'ok' if ready else '--'}] Demo data " + ("seeded" if ready else
+          "not generated yet. `make demo` (or `make seed`) creates it."))
+    if not ok:
+        print("Fix the items marked !! before the demo.")
+    elif ready:
+        print("Ready for the demo.")
+    else:
+        print("Software is ready. Run `make demo` to generate the data and start the app.")
     return 0 if ok else 1
 
 
 def cmd_test(args) -> int:
+    from . import config
+
     return subprocess.call([sys.executable, "-m", "pytest", *args.pytest_args], cwd=str(config.PROJECT_ROOT))
 
 

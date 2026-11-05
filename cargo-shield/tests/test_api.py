@@ -68,7 +68,7 @@ def test_review_queue_and_decisions(client):
 
 def test_screen_a_new_booking_via_api(client, conn):
     sid = conn.execute("SELECT id FROM shipper WHERE kyc_status = 'verified' LIMIT 1").fetchone()[0]
-    body = {"shipper_id": sid, "origin": "NBO", "destination": "JNB", "flight_date": "2026-12-01",
+    body = {"shipper_id": sid, "origin": "NBO", "destination": "JNB",
             "commodity_text": "Documents", "pieces": 20, "weight_kg": 400, "volume_m3": 1.3,
             "declared_value_usd": 900, "payment_method": "bank_transfer", "lead_time_hours": 48}
     r = client.post("/api/bookings", json=body)
@@ -126,6 +126,6 @@ def test_schema_files_define_the_same_tables_and_columns():
             out[name] = cols
         return out
 
-    lite = shape((root / "schema.sql").read_text())
-    pg = shape((root / "schema_postgres.sql").read_text())
+    lite = shape((root / "schema.sql").read_text(encoding="utf-8"))
+    pg = shape((root / "schema_postgres.sql").read_text(encoding="utf-8"))
     assert lite == pg and len(lite) == 9
