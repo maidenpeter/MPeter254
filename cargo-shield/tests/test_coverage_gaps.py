@@ -60,7 +60,7 @@ def test_reviewer_approval_clears_a_shipper(conn):
         for (hits,) in conn.execute("SELECT r.rule_hits_json FROM booking b JOIN risk_score r ON r.booking_id = b.id "
                                     "WHERE b.shipper_id = ?", (sid,)):
             if other_open_high == 0:
-                assert "shipper_has_other_flagged_booking" not in hits
+                assert "shipper_has_other_high_booking" not in hits
 
 
 def test_reject_flags_the_shipper_and_rescores_linked_open_bookings(client, conn):

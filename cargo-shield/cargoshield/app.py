@@ -8,6 +8,7 @@ import secrets
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
+from datetime import timedelta
 from typing import Any, Iterator, Literal
 from urllib.parse import urlparse
 
@@ -57,6 +58,11 @@ async def guard(request: Request, call_next):
     """
     client = request.client.host if request.client else ""
     server = (request.scope.get("server") or ("",))[0]
+    # A browser tricked by DNS rebinding sends the attacker's name as Host: refuse
+    # any Host that isn't this machine or the configured public address.
+    host = (request.headers.get("host") or "").rsplit(":", 1)[0].strip("[]").lower()
+    if host not in _allowed_hosts(server):
+        return JSONResponse({"detail": "Unknown host."}, status_code=400)
     local = client in LOCAL_CLIENTS or (bool(client) and client == server)  # unknown client: not local
     if not request.url.path.startswith(PUBLIC_PREFIXES) and not local:
         return JSONResponse({"detail": "Staff pages are only available on the presenter's laptop."}, status_code=403)
@@ -65,6 +71,16 @@ async def guard(request: Request, call_next):
         if origin and urlparse(origin).netloc != request.headers.get("host"):
             return JSONResponse({"detail": "Cross-site request refused."}, status_code=403)
     return await call_next(request)
+
+
+def _allowed_hosts(server: str) -> set[str]:
+    hosts = {"localhost", "127.0.0.1", "::1", "testserver"}
+    if server:
+        hosts.add(server.lower())
+    configured = str(config.settings()["server"].get("public_base_url") or "auto")
+    if configured != "auto" and urlparse(configured).hostname:
+        hosts.add(urlparse(configured).hostname.lower())
+    return hosts
 
 
 _watched: dict[str, float] = {}
@@ -171,6 +187,7 @@ def api_demo(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     report.pop("missed_awbs", None)
     return {
         "airline": config.airline_name(),
+        "data_label": config.settings()["airline"].get("data_label", ""),
         "seeded_at": db.get_meta(conn, "seeded_at"),
         "hero_high_booking_id": meta.get("hero_high_booking_id"),
         "hero_high_awb": awbmod.fmt(meta.get("hero_high_awb", "")),
@@ -185,7 +202,7 @@ def api_demo(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
 
 _BOOKING_LIST_SQL = """
 SELECT b.id, b.awb, b.origin, b.destination, b.flight_date, b.commodity_text, b.commodity_class,
-       b.weight_kg, b.declared_value_usd, b.booked_at, b.status,
+       b.weight_kg, b.declared_value_usd, b.booked_at, b.lead_time_hours, b.status,
        r.score, r.band, r.reasons_json,
        (SELECT COUNT(*) FROM policy p WHERE p.booking_id = b.id AND p.status = 'active') AS policies
 FROM booking b JOIN risk_score r ON r.booking_id = b.id
@@ -194,6 +211,7 @@ FROM booking b JOIN risk_score r ON r.booking_id = b.id
 
 def _list_item(r: sqlite3.Row) -> dict[str, Any]:
     reasons = json.loads(r["reasons_json"])
+    departure = db.parse_dt(r["booked_at"]) + timedelta(hours=r["lead_time_hours"])
     top = next((x["text"] for x in reasons if x["kind"] == "rule"), None)
     return {
         "id": r["id"], "awb": awbmod.fmt(r["awb"]), "origin": r["origin"], "destination": r["destination"],
@@ -202,6 +220,7 @@ def _list_item(r: sqlite3.Row) -> dict[str, Any]:
         "declared_value_usd": r["declared_value_usd"], "booked_at": r["booked_at"], "status": r["status"],
         "score": r["score"], "band": r["band"], "top_reason": top, "reason_count": len(reasons),
         "has_policy": bool(r["policies"]),
+        "departure_at": db.iso(departure),
     }
 
 
@@ -245,7 +264,7 @@ def _booking_detail(conn: sqlite3.Connection, booking_id: int, request: Request)
     age_days = (db.parse_dt(b["booked_at"]) - db.parse_dt(s["created_at"])).days
     nb = conn.execute("SELECT COUNT(*) FROM booking WHERE shipper_id = ?", (s["id"],)).fetchone()[0]
     p = policies.for_booking(conn, booking_id)
-    q = policies.quote_booking(conn, booking_id)
+    q = policies.quote_booking(conn, booking_id, flagged=set(flagged))
     reviews = [dict(r) for r in conn.execute(
         "SELECT decision, note, decided_by, decided_at FROM review_decision WHERE booking_id = ? ORDER BY id", (booking_id,))]
     volume = b["volume_m3"]
@@ -256,6 +275,7 @@ def _booking_detail(conn: sqlite3.Connection, booking_id: int, request: Request)
             "commodity_label": commodity.label(b["commodity_class"]),
             "payment_label": commodity.payment_label(b["payment_method"]),
             "density_kg_m3": round(b["weight_kg"] / volume) if volume else None,
+            "departure_at": db.iso(db.parse_dt(b["booked_at"]) + timedelta(hours=b["lead_time_hours"])),
             "payment_ref": graph.mask("payment_ref", b["payment_ref"]) if b["payment_ref"] else None,
         },
         "shipper": {  # internal staff view; contact details masked
@@ -319,13 +339,12 @@ def api_new_booking(body: NewBooking, request: Request, conn: sqlite3.Connection
         raise HTTPException(409, "AWB already exists")
     # The flight date is where the lead time lands, in the origin's local time.
     from datetime import date as _date, timedelta as _td, timezone as _tz
-    from zoneinfo import ZoneInfo
 
-    from .seed import AIRPORT_TZ
+    from .seed import origin_zone
 
     now = db.utcnow()
     departure_local = (now + _td(hours=body.lead_time_hours)).replace(tzinfo=_tz.utc).astimezone(
-        ZoneInfo(AIRPORT_TZ.get(body.origin.upper(), "UTC")))
+        origin_zone(body.origin.upper()))
     flight_date = departure_local.date()
     if body.flight_date:
         try:
@@ -371,12 +390,15 @@ def api_simulate(request: Request, conn: sqlite3.Connection = Depends(get_conn),
 @app.get("/api/review-queue")
 def api_review_queue(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     rows = conn.execute(
-        _BOOKING_LIST_SQL + " WHERE b.status IN ('in_review', 'on_hold') ORDER BY b.status = 'on_hold', r.score DESC, b.booked_at DESC"
+        _BOOKING_LIST_SQL + " WHERE b.status IN ('in_review', 'on_hold')"
     ).fetchall()
+    # Soonest departure first: that's the order a reviewer has to work in. Held items last.
+    rows = sorted(rows, key=lambda r: (r["status"] == "on_hold",
+                                       db.parse_dt(r["booked_at"]) + timedelta(hours=r["lead_time_hours"])))
     decided = conn.execute(
         """SELECT d.booking_id, d.decision, d.note, d.decided_at, b.awb, r.score
            FROM review_decision d JOIN booking b ON b.id = d.booking_id JOIN risk_score r ON r.booking_id = b.id
-           ORDER BY d.id DESC LIMIT 20"""
+           ORDER BY d.decided_at DESC, d.id DESC LIMIT 20"""
     ).fetchall()
     items = []
     for r in rows:
@@ -408,9 +430,13 @@ def api_review(booking_id: int, body: ReviewBody, request: Request,
                  (booking_id, body.decision, (body.note or "").strip() or None, body.reviewer, db.iso(db.utcnow())))
     conn.execute("UPDATE booking SET status = ? WHERE id = ?", (status, booking_id))
     conn.commit()
+    if body.decision == "reject":  # a refused shipment carries no cover
+        conn.execute("UPDATE policy SET status = 'cancelled' WHERE booking_id = ? AND status = 'active'", (booking_id,))
+        conn.commit()
     rescored = 0
-    if body.decision == "reject":
-        # The shipper is now flagged: their other open bookings and their contacts' change too.
+    if body.decision in ("reject", "approve"):
+        # The shipper's standing changed (flagged, or cleared): their other open
+        # bookings and their contacts' bookings are rescored.
         shipper_id = conn.execute("SELECT shipper_id FROM booking WHERE id = ?", (booking_id,)).fetchone()[0]
         rescored = risk.rescore_after_flag(conn, shipper_id, get_model(request), skip_booking=booking_id)
     return {"booking_id": booking_id, "status": status, "rescored": rescored}
@@ -483,11 +509,14 @@ def _result_page(res: verify.VerifyResult) -> HTMLResponse:
     rows = ""
     labels = {"awb": "Air waybill", "origin": "From", "destination": "To", "flight_date": "Flight date",
               "pieces": "Pieces", "weight_kg": "Weight (kg)", "carriage_status": "Status", "policy_no": "Cover",
-              "route": "Route", "sum_insured_usd": "Sum insured (USD)", "status": "Status", "issued_at": "Issued"}
+              "route": "Route", "sum_insured_usd": "Sum insured (USD)", "status": "Status", "issued_at": "Issued",
+              "cover_ends": "Cover ends", "ended_on": "Cover ended"}
     for k, v in (res.details or {}).items():
-        if isinstance(v, float):
+        if k == "weight_kg":
+            v = f"{v:,.1f}" if v < 100 else f"{v:,.0f}"
+        elif isinstance(v, float):
             v = f"{v:,.2f}" if k.endswith("usd") else f"{v:,.0f}"
-        elif k in ("flight_date", "issued_at") and isinstance(v, str):
+        elif k in ("flight_date", "issued_at", "cover_ends", "ended_on") and isinstance(v, str):
             v = verify.nice_date(v)
         elif k == "status" and isinstance(v, str):
             v = v.capitalize()
@@ -507,7 +536,7 @@ td{{padding:6px 0}} footer{{color:#667085;font-size:12px;margin-top:20px}}
 <div class="brand">CargoShield</div><div class="sub">Verification for {airline}</div>
 <div class="card"><span class="result">{html.escape(res.result)}</span>
 <p>{html.escape(res.message)}</p><table>{rows}</table></div>
-<footer>Demo data built on the public flight schedule. Synthetic records only.</footer>
+<footer>{html.escape(config.settings()["airline"].get("data_label", ""))} Synthetic records only.</footer>
 </main></body></html>"""
     return HTMLResponse(body)
 

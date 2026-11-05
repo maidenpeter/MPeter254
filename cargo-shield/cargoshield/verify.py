@@ -12,7 +12,8 @@ Results:
     INVALID FORMAT  typed input that isn't a well-formed AWB number
     SUSPICIOUS      a document whose number could never have been issued, whose
                     details don't match the record, or whose QR points elsewhere
-    NOT ACTIVE      the booking or policy exists but is no longer active
+    NOT ACTIVE      the booking was refused, or the cover was cancelled or has ended
+    OTHER AIRLINE   a well-formed AWB with another airline's prefix
     UNREADABLE      the photo couldn't be read; ask for the number
 """
 
@@ -47,9 +48,15 @@ OFFICIAL_CHANNELS = "Only pay through {airline}'s official channels."
 # Wording that appears on scam paperwork and never on a real air waybill: fees
 # demanded by an "agent" before goods are released or loaded.
 _SCAM_RE = re.compile(
-    r"(clear(ing|ance)|release|storage|demurrage|customs|handling)\s+(fee|charge)s?"
-    r"|pay(ment)?\b[^.\n]{0,60}\bto\s+(the\s+|our\s+)?agent"
-    r"|balance\s+of\s+usd[^.\n]{0,40}\bdue",
+    # "pay ... to the agent", "send the fee via our agent"
+    r"\b(pay|payment|paid|remit|send|deposit)\b[^.\n]{0,60}\b(to|via|through)\s+(the\s+|our\s+|an?\s+|your\s+)?agent"
+    # "release on payment of", "cleared upon payment"
+    r"|\b(release|released|clearing|clearance|cleared)\s+(on|upon|after|against)\s+payment"
+    # "pay the storage charges ... to avoid auction / before release / before loading"
+    r"|\bpay(ment)?\b[^.\n]{0,50}\b(fee|fees|charge|charges)\b[^.\n]{0,40}\b(before|to avoid|or)\b[^.\n]{0,20}"
+    r"\b(release|loading|auction|seizure|forfeit)"
+    r"|\bbalance\s+of\s+(usd|kes|\$)[^.\n]{0,40}\bdue\b"
+    r"|\bto\s+avoid\s+(auction|seizure|forfeiture)",
     re.IGNORECASE,
 )
 
@@ -124,7 +131,7 @@ def _carriage_status(row: sqlite3.Row) -> str:
     # Public wording follows the flight only. A booking waiting for a reviewer reads
     # exactly like any other one, so the internal flag never shows.
     full = conn_row_departure(row)
-    if full is not None and full <= db.utcnow():
+    if row["status"] == "accepted" and full is not None and full <= db.utcnow():
         return "Flown"
     return "Booked"
 
@@ -232,7 +239,8 @@ def _policy_result(conn: sqlite3.Connection, p: sqlite3.Row | None, shown: str) 
                             "No CargoShield cover matches this certificate. Do not rely on it, and do not pay "
                             "anyone because of it.", shown)
     d = _policy_details(conn, p)
-    if p["status"] != "active":
+    refused = conn.execute("SELECT status FROM booking WHERE id = ?", (p["booking_id"],)).fetchone()["status"] == "rejected"
+    if p["status"] != "active" or refused:
         return VerifyResult(NOT_ACTIVE, "policy", f"Cover {d['policy_no']} exists but is no longer active.", shown,
                             {"policy_no": d["policy_no"], "status": p["status"]})
     ends = policies.cover_ends(d["flight_date"])
@@ -301,6 +309,13 @@ def _route_mismatch(text: str, row: sqlite3.Row) -> bool:
     return not {row["origin"], row["destination"]} <= codes
 
 
+def _fee_demand(number: str, what: str) -> VerifyResult:
+    return VerifyResult(SUSPICIOUS, "policy" if what == "certificate" else "awb",
+                        f"Air waybill {awbmod.fmt(number)} is real, but this {what} asks for money to be paid to "
+                        f"someone before the goods move. {_airline()} never collects fees through agents or chat "
+                        "messages. " + DO_NOT_PAY.format(airline=_airline()), awbmod.fmt(number))
+
+
 def _ocr_slip(number: str, expected: str) -> bool:
     """True if `number` is `expected` with one digit misread (and so fails the check digit)."""
     if len(number) != len(expected) or awbmod.validate(number).ok:
@@ -356,6 +371,8 @@ def check_image(conn: sqlite3.Connection, data: bytes, trusted_hosts: Iterable[s
                                 f"({res.details['awb']}) than the one printed on this certificate "
                                 f"({awbmod.fmt(others[0])}). The certificate has been altered. "
                                 "Do not pay on the strength of it.", res.input_value)
+        if text and _SCAM_RE.search(text):
+            return _fee_demand(cover_awb, "certificate")
         if not on_page:
             res.warnings.append("The air waybill number printed on the certificate could not be read, so compare "
                                 "it with the one above yourself.")
@@ -385,10 +402,38 @@ def check_image(conn: sqlite3.Connection, data: bytes, trusted_hosts: Iterable[s
                             f"The QR code ({awbmod.fmt(qr_numbers[0])}) and the printed air waybill number don't "
                             "match. " + DO_NOT_PAY.format(airline=_airline()), awbmod.fmt(qr_numbers[0]))
 
+    # Two different, well-formed AWB numbers on one page (allowing a one-digit OCR
+    # slip) means someone pasted a real number onto another document.
+    distinct = []
+    for n in valid:
+        if not any(n == m or sum(a != b for a, b in zip(n, m)) <= 1 for m in distinct):
+            distinct.append(n)
+    if len(distinct) > 1:
+        return VerifyResult(SUSPICIOUS, "policy" if is_certificate else "awb",
+                            f"This document carries more than one air waybill number ({awbmod.fmt(distinct[0])} and "
+                            f"{awbmod.fmt(distinct[1])}). Genuine paperwork carries one. "
+                            + DO_NOT_PAY.format(airline=_airline()), awbmod.fmt(distinct[0]))
+
     found = [n for n in valid if _lookup_awb(conn, n) is not None]
     number = found[0] if found else valid[0]
 
+    if awbmod.validate(number).prefix != config.awb_prefix():
+        # Another airline's number. A paper that still claims to be ours, or asks for
+        # a fee, is a fake; otherwise send the person to that airline.
+        if re.search(re.escape(_airline()), text, re.IGNORECASE) or _SCAM_RE.search(text):
+            return VerifyResult(SUSPICIOUS, "policy" if is_certificate else "awb",
+                                f"This document names {_airline()} but its number, {awbmod.fmt(number)}, belongs to "
+                                "another airline. " + DO_NOT_PAY.format(airline=_airline()), awbmod.fmt(number))
+        res = check_awb(conn, number, from_document=True)
+        res.kind = "policy" if is_certificate else "awb"
+        if is_certificate:
+            res.message = (f"This certificate is for {awbmod.fmt(number)}, another airline's air waybill. CargoShield "
+                           f"can only check cover on {_airline()} shipments. Check it with the insurer named on it.")
+        return res
+
     if is_certificate:
+        if _SCAM_RE.search(text):
+            return _fee_demand(number, "certificate")
         if not found:
             return VerifyResult(NOT_FOUND, "policy",
                                 f"This certificate quotes air waybill {awbmod.fmt(number)}, but {_airline()} has no "
@@ -404,10 +449,7 @@ def check_image(conn: sqlite3.Connection, data: bytes, trusted_hosts: Iterable[s
     if res.result == GENUINE:
         row = _lookup_awb(conn, number)
         if _SCAM_RE.search(text):
-            return VerifyResult(SUSPICIOUS, "awb",
-                                f"Air waybill {awbmod.fmt(number)} is real, but this document asks for a fee to be "
-                                f"paid before the goods move. {_airline()} never collects fees through agents or "
-                                "chat messages. " + DO_NOT_PAY.format(airline=_airline()), awbmod.fmt(number))
+            return _fee_demand(number, "document")
         if _route_mismatch(text, row):
             return VerifyResult(SUSPICIOUS, "awb",
                                 f"Air waybill {awbmod.fmt(number)} is real, but the airports on this document don't "

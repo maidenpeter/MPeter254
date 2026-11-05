@@ -58,7 +58,7 @@ def is_seeded(path: str | Path | None = None) -> bool:
     if not path.exists() or path.stat().st_size == 0:
         return False
     try:
-        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        c = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
         try:
             row = c.execute("SELECT value FROM demo_meta WHERE key = 'seeded_at'").fetchone()
         finally:

@@ -85,7 +85,9 @@ def to_dict(row: sqlite3.Row | dict[str, Any], base_url: str | None = None) -> d
         except (IndexError, KeyError):
             pass
         if fd:
-            d["cover_ends"] = cover_ends(fd).isoformat()
+            ends = cover_ends(fd)
+            d["cover_ends"] = ends.isoformat()
+            d["cover_ended"] = ends < db.utcnow().date()
     if base_url:
         d["verify_url"] = verify_url(base_url, row["qr_token"])
         d["qr_png"] = f"/api/policies/{row['id']}/qr.png"
@@ -207,11 +209,11 @@ def certificate_png(conn: sqlite3.Connection, pid: int, base_url: str) -> bytes:
         awbmod.fmt(b["awb"]),
         b["shipper_name"],
         f"{b['origin']} to {b['destination']}",
-        b["flight_date"],
+        f"{date.fromisoformat(b['flight_date']):%d %b %Y}",
         b["commodity_text"],
         p["sum_insured_usd"],
         p["premium_usd"],
-        p["issued_at"][:10],
+        f"{date.fromisoformat(p['issued_at'][:10]):%d %b %Y}",
         value_of_goods_usd=b["declared_value_usd"],
         basis="In excess of carrier liability (Montreal Convention Art. 22(3)). No value declared for carriage.",
         valid_until=f"{cover_ends(b['flight_date']):%d %b %Y}",

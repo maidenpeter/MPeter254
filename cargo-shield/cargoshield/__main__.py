@@ -1,7 +1,8 @@
 """Command line: python -m cargoshield <command>
 
     seed     generate data, train the model, score everything, snapshot
-    train    retrain the anomaly model and rescore every booking
+    train    reset to the demo start, retrain, rescore and save as the new start
+             (clears issued cover, reviews and live bookings since the seed)
     run      start the web app
     demo     seed, then run (one command for the whole demo)
     reset    put the database back to the demo start state
@@ -59,11 +60,9 @@ def cmd_train(args) -> int:
     conn = db.connect()
     model = anomaly.train(conn)
     anomaly.save(model)
-    risk.score_all(conn, model)
-    # New rules can send already-departed flights to review; give them the decision a
-    # reviewer would have made at the time (as the seed does), then score once more.
-    if seed.backfill_past_reviews(conn, db.utcnow()):
-        risk.score_all(conn, model)
+    # New rules can send already-departed flights to review: give them the decision a
+    # reviewer would have made at the time, scoring until the two agree (as the seed does).
+    seed.settle_reviews(conn, model, db.utcnow())
     db.snapshot(conn)
     print(evaluation.format_report(evaluation.engine_report(conn)))
     print("Saved as the new demo starting state (what Reset restores).")
@@ -134,17 +133,23 @@ def cmd_doctor(args) -> int:
     line(sys.version_info >= (3, 11), f"Python {sys.version.split()[0]}", "Python 3.11 or newer is required")
     for mod, pip_name in [("fastapi", "fastapi"), ("uvicorn", "uvicorn"), ("multipart", "python-multipart"),
                           ("yaml", "pyyaml"), ("sklearn", "scikit-learn"), ("faker", "faker"),
-                          ("qrcode", "qrcode"), ("PIL", "pillow"), ("pytesseract", "pytesseract"),
-                          ("zoneinfo", "tzdata")]:
+                          ("qrcode", "qrcode"), ("PIL", "pillow"), ("pytesseract", "pytesseract")]:
         try:
             importlib.import_module(mod)
             line(True, f"{pip_name} installed")
         except ImportError:
             line(False, f"{pip_name} missing", "pip install -r requirements.txt")
+    try:
+        from zoneinfo import ZoneInfo
+
+        ZoneInfo("Africa/Nairobi")
+        line(True, "time zone data available")
+    except Exception:
+        line(False, "time zone data missing", "pip install tzdata")
     if not ok:
         print("Install the missing packages, then run doctor again.")
         return 1
-    from . import config, db, ocr
+    from . import config, db, ocr, seed
 
     tess = ocr.tesseract_available()
     print(f"  [{'ok' if tess else '--'}] Tesseract OCR " + ("found" if tess else
@@ -153,6 +158,9 @@ def cmd_doctor(args) -> int:
     qr = ocr.qr_available()
     print(f"  [{'ok' if qr else '--'}] QR decoding " + ("available" if qr else
           "unavailable (pip install zxing-cpp). The certificate can still be checked by its AWB number."))
+    if seed.routes_are_placeholder():
+        print("  [--] data/routes.csv is still the placeholder schedule. Refresh it from the airline's "
+              "public schedule before a real pitch, or say 'placeholder schedule' when presenting.")
     ready = db.is_seeded() and config.model_path().exists() and config.snapshot_path().exists()
     print(f"  [{'ok' if ready else '--'}] Demo data " + ("seeded" if ready else
           "not generated yet. `make demo` (or `make seed`) creates it."))
@@ -179,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--shippers", type=int)
     p.add_argument("--seed", type=int)
     p.set_defaults(fn=cmd_seed)
-    sub.add_parser("train", help="retrain the anomaly model and rescore").set_defaults(fn=cmd_train)
+    sub.add_parser("train", help="reset to the demo start, retrain, rescore, save as the new start").set_defaults(fn=cmd_train)
     for name, fn in (("run", cmd_run), ("demo", cmd_demo)):
         p = sub.add_parser(name, help="start the web app" if name == "run" else "seed, then start the web app")
         p.add_argument("--host")

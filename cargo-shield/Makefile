@@ -14,7 +14,7 @@ install:  ## one-time: install Python packages (needs internet)
 seed:     ## generate data, train the model, score everything, save the reset snapshot
 	$(PYTHON) -m cargoshield.seed --bookings 3000
 
-train:    ## retrain the anomaly model and rescore (after editing config/rules.yaml)
+train:    ## after editing config/rules.yaml: reset to the demo start, retrain, rescore, save as the new start
 	$(PYTHON) -m cargoshield train
 
 run:      ## start the app on http://localhost:8000

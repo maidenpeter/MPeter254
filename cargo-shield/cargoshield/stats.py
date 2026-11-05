@@ -18,7 +18,10 @@ def kpis(conn: sqlite3.Connection) -> dict[str, Any]:
         "flagged_high": bands.get("HIGH", 0),
         "flagged_medium": bands.get("MEDIUM", 0),
         "review_pending": one("SELECT COUNT(*) FROM booking WHERE status IN ('in_review', 'on_hold')"),
-        "review_decided": one("SELECT COUNT(DISTINCT booking_id) FROM review_decision"),
+        "review_on_hold": one("SELECT COUNT(*) FROM booking WHERE status = 'on_hold'"),
+        # Final decisions only (approved or refused); a hold is not a decision.
+        "review_decided": one("SELECT COUNT(*) FROM booking b WHERE b.status IN ('accepted', 'rejected') AND EXISTS "
+                              "(SELECT 1 FROM review_decision d WHERE d.booking_id = b.id)"),
         "policies_issued": one("SELECT COUNT(*) FROM policy WHERE status = 'active'"),
         "premium_written_usd": round(one("SELECT COALESCE(SUM(premium_usd), 0) FROM policy WHERE status = 'active'"), 2),
         "sum_insured_usd": round(one("SELECT COALESCE(SUM(sum_insured_usd), 0) FROM policy WHERE status = 'active'"), 2),

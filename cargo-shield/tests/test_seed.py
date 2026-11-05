@@ -55,9 +55,17 @@ def test_bookings_happen_after_the_shipper_exists(conn):
 
 
 def test_contact_details_cannot_reach_real_people(conn):
+    phones = []
     for r in conn.execute("SELECT phone, email FROM shipper"):
         assert r["email"].endswith(".example"), r["email"]  # RFC 2606 reserved domain
-        assert re.fullmatch(r"\+\d{2,3} 0\d{3} \d{3} \d{3}", r["phone"]), r["phone"]
+        assert re.fullmatch(r"\+\d{2,3} 88\d \d{3} \d{3}|\+852 88\d\d \d{4}", r["phone"]), r["phone"]
+        phones.append(r["phone"])
+    try:
+        import phonenumbers
+    except ImportError:
+        return  # the format check above still holds; the plan check needs the library
+    for p in phones:  # Google's numbering-plan data: no demo country assigns these
+        assert not phonenumbers.is_valid_number(phonenumbers.parse(p, None)), p
 
 
 def test_ground_truth_is_consistent(conn):

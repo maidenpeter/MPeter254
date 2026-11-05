@@ -88,11 +88,12 @@ def simulate_booking(conn: sqlite3.Connection, model: AnomalyModel, rng: random.
             s = g.make_shipper(country, cls, g.anchor - timedelta(days=rng.uniform(2, 20)), "pending",
                                personal_email=True)
             s["id"] = _insert_shipper(conn, s)
-            phys = (g._physical(cls, weight=rng.uniform(3, 20), vpk=rng.uniform(45000, 100000)) if cls == "valuables"
+            text = rng.choice(commodity.info(cls)["descriptions"])
+            phys = (g._physical(cls, weight=rng.uniform(3, 20), vpk=g.valuables_vpk(text)) if cls == "valuables"
                     else g._physical(cls, weight=rng.uniform(80, 400), vpk=rng.uniform(400, 1100)))
             route = g.route_from(s["_hub"], ["HKG", "JNB", "NBO"])
             booked, dep = _now_timing(g, route, rng.uniform(20, 60))
-            b = g.booking(s, cls, rng.choice(commodity.info(cls)["descriptions"]), route, phys,
+            b = g.booking(s, cls, text, route, phys,
                           rng.choice(["mobile_money", "card"]), booked, dep)
         else:
             row = conn.execute("SELECT * FROM shipper WHERE kyc_status != 'failed' ORDER BY RANDOM() LIMIT 1").fetchone()

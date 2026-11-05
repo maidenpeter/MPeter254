@@ -29,7 +29,7 @@ anomaly:
 
 # Rules that depend on the fraud graph. They run in a second pass, after the
 # engine knows which shippers are flagged.
-graph_rules: [linked_to_flagged_shipper, shipper_has_other_flagged_booking]
+graph_rules: [linked_to_flagged_shipper, shipper_previously_rejected, shipper_has_other_high_booking]
 
 rules:
   # ---- Strong signals: any one of these puts a booking in MEDIUM or higher ----
@@ -91,21 +91,29 @@ rules:
         - {field: linked_flagged_count, op: gte, value: 1}
     reason: "Shares {linked_via} with {linked_flagged_text}."
 
-  - id: shipper_has_other_flagged_booking
-    weight: 30
+  - id: shipper_previously_rejected
+    weight: 45
     when:
       all:
-        - {field: shipper_other_flagged, op: eq, value: true}
-    reason: "This shipper has {shipper_other_flag_text}."
+        - {field: shipper_previously_rejected, op: eq, value: true}
+    reason: "A reviewer refused another booking from this shipper."
 
   - id: watchlist_shipper
-    weight: 35
+    weight: 40
     when:
       all:
         - {field: kyc_status, op: eq, value: failed}
     reason: "Shipper failed KYC checks and sits on the internal watchlist."
 
   # ---- Supporting signals: they add weight but rarely flag a booking alone ----
+  - id: shipper_has_other_high_booking
+    weight: 30
+    when:
+      all:
+        - {field: shipper_other_high, op: eq, value: true}
+        - {field: shipper_previously_rejected, op: eq, value: false}
+    reason: "This shipper has another booking that scored HIGH and is waiting for a reviewer."
+
   - id: value_density_outlier
     weight: 20
     when:

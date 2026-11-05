@@ -2,8 +2,8 @@
 
 ## Before you walk in
 
-0. Before a real pitch, refresh `data/routes.csv` from the airline's public schedule page and set `awb_prefix` (999 is Air China's real prefix). Until you do, say "built on a placeholder schedule" rather than "the public schedule".
-1. On the day, run `make demo`. It reseeds, so the HIGH booking sits on a flight that hasn't left yet, whatever time you run it.
+0. Before a real pitch, refresh `data/routes.csv` from the airline's public schedule page and set `awb_prefix` (999 is Air China's real prefix). Until you do, set `data_label: "Demo data built on a placeholder schedule."` in `config/settings.yaml` and say "placeholder schedule" rather than "the public schedule".
+1. On the day, run `make demo`. It reseeds, so the HIGH booking sits on a Nairobi flight that leaves 4 to 11 hours later, whatever time you run it. Run it again if you present later than that.
 2. Open http://localhost:8000 in a full-screen browser window.
 3. Run `make doctor` once. If Tesseract is missing, step 1 still works: the chat will ask for the number, and you type `999-47182030`.
 4. Rehearsing? Hit **Reset** (top right) or run `make reset` between runs. It puts everything back exactly as it was after `make demo`.
@@ -27,6 +27,8 @@ Point at the top strip: bookings screened, sent to review, policies, premium, fa
 2. Click the highlighted document. It goes into the chat as a photo.
 3. In a couple of seconds: **NOT FOUND**. "Demo Airline has no booking with air waybill 999-47182030. Do not pay anyone, release goods or hand over money on the strength of this document."
 
+The drawer header shows when the flight leaves, with a countdown.
+
 Say: "A buyer in Lagos gets this on WhatsApp and is asked to pay a clearing fee. One photo, one answer, before the money moves. The Fakes caught counter just went up by one."
 
 Optional: click the fake with the look-alike QR code. It comes back SUSPICIOUS because the QR points to a site that isn't ours.
@@ -37,6 +39,7 @@ Optional: click the fake with the look-alike QR code. It comes back SUSPICIOUS b
 2. Read the reasons, top to bottom:
    - New shipper, 12 days old, booking high-value goods
    - Shares a phone number with a flagged shipper
+   - A reviewer refused another booking from this shipper (gemstones, last week)
    - Booked a few hours before departure and paid in cash
    - KYC not complete
    - The model's note, marked as a supporting signal only
@@ -57,7 +60,7 @@ Optional finish: click **Send the certificate to the chat**. The chat reads the 
 
 ### Close (15 seconds)
 
-"Same engine, three revenue lines: fewer scams in your name, fewer bad bookings on your aircraft, and premium on the good ones. Next step is a pilot on real schedule data, hosted in Kenya."
+"One engine, and it pays three ways: scams stop using your name, bad bookings stay off your aircraft, and the good ones earn premium. Next step is a pilot on real schedule data, hosted in Kenya."
 
 ## If something goes wrong
 
@@ -74,4 +77,4 @@ Optional finish: click **Send the certificate to the chat**. The chat reads the 
 
 - Tick **Live feed** on the Bookings tab. A new booking arrives every few seconds and gets scored on the spot; about one in eight carries a risk pattern.
 - Open the **Review queue**. The banner shows the engine check: every planted risk caught, and the false-positive rate on clean bookings. Approve, hold or reject a booking (rejecting needs a note).
-- Search the bookings for `General goods` and filter to Flagged to show the vague-description rule.
+- Search the bookings for `General goods` and click **Medium + High** to show the vague-description rule.

@@ -16,8 +16,8 @@ Everything. There is no connection to any airline system.
 |---|---|
 | Airline | "Demo Airline", AWB prefix `999`, as the brief asked. **Heads-up: 999 is Air China's real cargo prefix**, and cargo people know their prefixes. Change `awb_prefix` in `config/settings.yaml` (to the airline's own prefix once you have permission) before showing anyone in the industry. |
 | Routes | `data/routes.csv`: Nairobi, Johannesburg and Hong Kong hubs plus African destinations. Days and times are placeholders. **Refresh this file from the airline's public schedule page before any real pitch.** Departure times are local to the origin airport; time zones come from a table in `cargoshield/seed.py`, or add a `timezone` column (e.g. `Africa/Nairobi`) for airports it doesn't know. |
-| Shippers (~400) | Invented company names. Emails use the reserved `.example` domain. Phone numbers put a `0` straight after the country code, a form the numbering plans in the demo countries don't issue, so none should reach a real phone. Any resemblance to a real business is chance. |
-| Bookings (3,000) | Generated with fixed random seeds, so the demo is the same every time. About 4% carry a planted risk pattern with a known answer, used to test the engine. |
+| Shippers (~400) | Invented company names. Emails use the reserved `.example` domain. Phone numbers start `88` after the country code, a block that Google's libphonenumber data lists as unassigned in every demo country, so they should not reach a real phone (a test checks this with the `phonenumbers` package). Any resemblance to a real business is chance. |
+| Bookings (3,000) | Generated with fixed random seeds, so the demo's AWB numbers, shippers and amounts are the same every time; counts, routes and dates follow the day you seed. About 4% carry a planted risk pattern with a known answer, used to test the engine. |
 | Fraud ring | Five planted shippers sharing a phone, an email and a payer account. |
 | Gold and specie | Gold is priced from `reference_prices.gold_usd_per_oz` in `config/commodities.yaml` (USD 3,900, roughly spot on 1 Nov 2026). Check spot before a demo; the HIGH demo booking is 6 kg of gold bars at that price. |
 | Fake documents | 8 images in `data/fakes/`, drawn with Pillow by the seed and dated around the day you seed. Each uses an AWB number that fails the check digit or does not exist. Scam *patterns* only (clearing-fee notes, release stamps, look-alike QR sites). Nothing copied from real forgeries, scam reports or court cases. |
@@ -77,13 +77,13 @@ data/routes.csv ─► seed.py ─► SQLite ─► risk.py (rules.yaml + Isolat
        pricing.py ─► policies.py ─► QR + certificate ─► /verify/policy/{token}
 ```
 
-**Screen.** Rules live in `config/rules.yaml`, each with a weight, a condition and the sentence staff see. Change a weight or threshold there and rerun `make train`; no code changes. The IsolationForest looks at density, value per kg, lead time, shipper age and route frequency. It only adds a few points for the most unusual 10% of bookings, and a booking with no rule hit is capped at 39, so the model is never the only reason anyone is flagged. Scoring runs in two passes: first each booking on its own evidence, then again once the engine knows which shippers are flagged, so links to them count.
+**Screen.** Rules live in `config/rules.yaml`, each with a weight, a condition and the sentence staff see. Change a weight or threshold there and rerun `make train`; no code changes. The IsolationForest looks at density, value per kg, lead time, shipper age and route frequency. It adds up to 20 points, and only for the most unusual 10% of bookings, and a booking with no rule hit is capped at 39, so the model is never the only reason anyone is flagged. Scoring runs in two passes: first each booking on its own evidence, then again once the engine knows which shippers are flagged, so links to them count.
 
 Bands: LOW 0 to 39, MEDIUM 40 to 69, HIGH 70+. HIGH goes to the review queue.
 
-On the seeded data the engine catches all 120 planted risks and flags about 0.1% of clean bookings as MEDIUM or higher (`make report` prints the numbers; it grades only the seeded bookings, since live-feed bookings have no known answer). Model points below 3 are dropped, so the reasons on screen always add up to the score, apart from the cap at 100.
+On the seeded data the engine catches all 120 planted risks and flags under 0.5% of clean bookings as MEDIUM or higher, mostly new importers of phones, which is what the new-shipper rule is for (`make report` prints the numbers; it grades only the seeded bookings, since live-feed bookings have no known answer). Model points below 3 are dropped, so the reasons on screen always add up to the score, apart from the cap at 100.
 
-HIGH bookings whose flights left before the seed ran come with a past reviewer decision (approved or rejected, with a note), so the live review queue only holds flights still to go.
+HIGH bookings whose flights left before the seed ran come with a past reviewer decision (approved or refused, with a note), so the live review queue only holds flights still to go. Those simulated decisions follow the seed's answer key, and they feed the scores (a refusal flags the shipper, an approval clears it), so the false-positive figure is measured with them in place. A refused shipper's next booking gets "A reviewer refused another booking from this shipper" (+45).
 
 **Fraud graph.** Shippers are linked through shared phone numbers, emails and payer account references (`contact_link` table). `GET /graph/shipper/{id}` returns everyone within 2 hops. A shipper is *flagged* if KYC failed, a reviewer rejected one of their bookings, or one of their bookings scores HIGH on its own evidence. Sharing an agent's phone number with other clean shippers is not, on its own, a reason to flag anyone; the demo includes such groups.
 
@@ -97,15 +97,15 @@ gross premium     = expected loss ÷ (1 − expense loading − profit margin)
 premium           = max(gross premium, minimum premium)
 ```
 
-Money is rounded half-up to the cent at each line, and each line is worked from the line above as shown, so every step can be redone on a calculator; the profit line takes the rounding cent. Cover is only offered before the flight departs, and not when the top-up is under $1,000 (`minimum_sum_insured_usd`), where the $25 minimum premium would be a silly rate. Cover runs until 30 days after the flight date, then the QR check reads NOT ACTIVE.
+Money is rounded half-up to the cent at each line, and each line is worked from lines already shown (the gross premium from the expected loss, then expense and profit as shares of the gross premium), so every step can be redone on a calculator; the profit line takes the rounding cent. Cover is only offered before the flight departs, and not when the top-up is under $1,000 (`minimum_sum_insured_usd`), where the $25 minimum premium would be a silly rate. Cover runs until 30 days after the flight date, then the QR check reads NOT ACTIVE.
 
-A MEDIUM booking still gets a priced quote, but it can't be bought with one click when the shipper isn't KYC-verified or is flagged, when the goods are valuables (specie needs its own wording), or when a fraud-indicator rule fired (`refer_if_rules`). The quote then says it has been referred to an underwriter. The quote and certificate state the basis: cover in excess of the carrier's liability, with no value declared for carriage.
+A LOW or MEDIUM booking always gets a priced quote, but it can't be bought with one click when the shipper isn't KYC-verified or is flagged, when the goods are valuables (specie needs its own wording), or when a fraud-indicator rule fired (`refer_if_rules`). The quote then says it has been referred to an underwriter. The quote and certificate state the basis: cover in excess of the carrier's liability, with no value declared for carriage.
 
 The 26 SDR/kg limit has applied since 28 December 2024 (up from 22). It applies to the actual weight of the packages (Art. 22(4)). Verify it, and the SDR rate, before any real use. Issuing cover creates a random 192-bit token and a QR code that links to `/verify/policy/{token}`.
 
 **Verify.** `GET /verify/awb/{awb}` checks the check digit, then looks the number up. `POST /verify/image` reads any QR code, then OCRs the printed text and cross-checks the two: a QR must point to the CargoShield host (no look-alike sites, no missing scheme, no `user@host` tricks), and a genuine policy QR on a certificate printed with a different AWB comes back SUSPICIOUS. If the photo can't be read it asks for the number (OCR gives up after 12 seconds). `GET /verify/policy/{token}` confirms cover is real and active. Policy numbers are sequential, so checking cover by number needs the AWB too.
 
-Answers carry route, flight date, pieces and weight only: never shipper names or contact details. A booking waiting for a reviewer reads "Booked", exactly like any other, so the internal flag never shows. Only a booking a reviewer rejected reads differently (NOT ACTIVE, with a warning not to pay), which is what the airline would tell anyone who asked. Every check goes into `verification_log`; anything that isn't an AWB is logged as a digit count, never the raw text, so phone numbers people type don't end up in the log. Opened in a browser, the verify links show a phone-friendly page; called from code, they return JSON.
+Answers carry route, flight date, pieces and weight only: never shipper names or contact details. A booking waiting for a reviewer reads "Booked", exactly like any other, so the internal flag never shows. Only a booking a reviewer rejected reads differently (NOT ACTIVE, with a warning not to pay), which is what the airline would tell anyone who asked. Every check goes into `verification_log`; typed input that isn't an AWB, a policy number or a link is logged as a digit count, never the raw text, so phone numbers people type don't end up in the log. Paper that asks for a release or clearing fee to be paid to an agent comes back SUSPICIOUS even when its AWB number is real, and so does a page carrying two different AWB numbers. Opened in a browser, the verify links show a phone-friendly page; called from code, they return JSON.
 
 **WhatsApp.** The demo uses a chat simulator in the UI. All message handling sits behind one function, `messaging.handle_message()`. `cargoshield/whatsapp.py` shows the adapter for the WhatsApp Business Cloud API (parse the webhook, build the reply). It is not connected and has not been tested against the live service.
 
@@ -125,10 +125,12 @@ cargo-shield/
 ## Changes from the brief, and why
 
 - **Folder, not a separate repo.** The code lives in `cargo-shield/` inside this repository because this workspace can only push here. `git subtree split --prefix cargo-shield` moves it into its own `cargo-shield` repo with history whenever you want.
-- **Three extra tables**: `review_decision` (approve/hold/reject with a note), `seed_truth` (which planted pattern each risky booking carries; only the tests read it) and `demo_meta`. Bookings also have a `payment_ref` column, because the fraud graph needs payer references and the brief's booking table had nowhere to keep them.
+- **Three extra tables**: `review_decision` (approve/hold/reject with a note), `seed_truth` (which planted pattern each risky booking carries; read by the tests, `make report` and the seed's simulated past decisions, never by the engine) and `demo_meta`. Bookings also have a `payment_ref` column, because the fraud graph needs payer references and the brief's booking table had nowhere to keep them.
 - **vis-network is bundled** in `cargoshield/static/vendor/` instead of loaded from a CDN, because the demo must work offline.
 - **SUSPICIOUS vs INVALID FORMAT.** A typed number that fails the check digit is INVALID FORMAT (probably a typo). The same number printed on a document is SUSPICIOUS, because the airline could never have issued it.
-- **NOT ACTIVE** is an extra verify result for a booking a reviewer rejected (and for cancelled cover), so a real AWB that will never fly doesn't get a green tick.
+- **NOT ACTIVE** is an extra verify result for a booking a reviewer refused, and for cover that was cancelled or has ended, so a real AWB that will never fly doesn't get a green tick.
+- **OTHER AIRLINE** is an extra result for a well-formed AWB with another airline's prefix. It isn't counted as a fake, unless the paper claims to be ours or asks for a fee.
+- **Referral.** Some quotes are priced but referred to an underwriter instead of sold (see Cover).
 
 ## Known limits (say these out loud if asked)
 
@@ -138,7 +140,7 @@ cargo-shield/
 - **The dashboard has no login.** It is locked to the presenter's laptop, which is fine for a demo and nothing more.
 - **OCR on real phone photos** is weaker than on these clean renders. Glare, folds and handwriting will cause misses; the chat falls back to asking for the number.
 - **Times** are stored as UTC and shown in the browser's local time; route departure times are placeholders. If the schedule has no flight in the next 11 hours when you seed, the HIGH demo booking gets a departure 6 hours out on a route that flies that day, which may not match the timetable.
-- **Small seeds.** Below about 1,000 bookings the planted share runs a little over 5%, so every pattern still appears at least twice.
+- **Small seeds.** At least 20 bookings are always planted, so below about 400 bookings the planted share rises above 5%, which keeps every pattern present at least twice. The shipper count grows with the bookings (about 7.5 bookings each).
 - **SQLite** is fine for a demo. The schema is written to move to Postgres; the queries use plain SQL.
 
 ## Data protection notes

@@ -18,6 +18,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import random
 import secrets
 import sys
@@ -67,9 +68,9 @@ COUNTRIES: dict[str, tuple[str, str, float, str, str, dict[str, float]]] = {
 }
 
 NAME_A = ["Savanna", "Baobab", "Jacaranda", "Acacia", "Sunbird", "Kestrel", "Equator", "Highland",
-          "Lakeside", "Coastline", "Northgate", "Bluecrest", "Mtoni", "Kijani", "Nyota", "Bahari",
-          "Pwani", "Tumaini", "Zuri", "Mlima", "Jua", "Upepo", "Imara", "Neema", "Fahari", "Kito",
-          "Tausi", "Chui", "Mawingu", "Amani", "Kilele", "Rafiki", "Sokoni", "Ziwa", "Milele", "Tembo",
+          "Lakeside", "Coastline", "Northgate", "Bluecrest", "Mtoni", "Kijani", "Nyota", "Mawimbi",
+          "Pwani", "Tumaini", "Shwari", "Mvuli", "Anga", "Upepo", "Kasuku", "Baraka", "Tulivu", "Kibo",
+          "Pembe", "Chui", "Mawingu", "Amani", "Kilele", "Rafiki", "Sokoni", "Ziwa", "Milele", "Tembo",
           "Juniper", "Silverleaf", "Redstone", "Greenfield", "Southwind", "Eastline", "Granite", "Hillcrest"]
 NAME_B = {
     "perishables": ["Fresh", "Farms", "Agro Exports", "Horticulture", "Growers", "Produce"],
@@ -114,11 +115,20 @@ AIRPORT_TZ = {
 }
 
 
-def _zone(name: str) -> ZoneInfo:
+def _zone(name: str):
+    """The airport's time zone, or plain UTC if it (or the tz database) is missing."""
     try:
         return ZoneInfo(name)
     except (ZoneInfoNotFoundError, ValueError):
-        return ZoneInfo("UTC")
+        return timezone.utc
+
+
+def origin_zone(airport: str):
+    """Time zone for an origin airport: routes.csv's timezone column, then the table above."""
+    for r in load_routes():
+        if r.origin == airport:
+            return _zone(r.tz)
+    return _zone(AIRPORT_TZ.get(airport, "UTC"))
 
 
 @dataclass(frozen=True)
@@ -168,6 +178,21 @@ class Route:
                 if dt <= before:
                     return dt
         raise RuntimeError(f"route {self.key} has no departures")
+
+
+# sha256 of the routes.csv this repo ships with. `make doctor` uses it to remind
+# the presenter that the schedule is still the placeholder one.
+PLACEHOLDER_ROUTES_SHA256 = "6eb2e1b94d3fd94c07be321f49ab0f2e0f6d792d78ddce0e2775b8fb19668455"
+
+
+def routes_are_placeholder() -> bool:
+    import hashlib
+
+    try:
+        data = config.routes_csv().read_bytes().replace(b"\r\n", b"\n")
+    except FileNotFoundError:
+        return False
+    return hashlib.sha256(data).hexdigest() == PLACEHOLDER_ROUTES_SHA256
 
 
 def load_routes(path: str | Path | None = None) -> list[Route]:
@@ -250,11 +275,15 @@ class Generator:
         raise RuntimeError("ran out of company names")
 
     def phone(self, country: str) -> str:
+        # Every number starts 88 after the country code: a block Google's
+        # libphonenumber data lists as unassigned in every demo country, so the
+        # numbers look normal but should not reach a real phone. A test checks
+        # this whenever the `phonenumbers` package is installed.
         dial = COUNTRIES[country][0]
+        n = 8 if country == "HK" else 9
         while True:
-            digits = "".join(str(self.rng.randint(0, 9)) for _ in range(9))
-            # A 0 right after the country code: not a number any of these plans issue.
-            p = f"+{dial} 0{digits[:3]} {digits[3:6]} {digits[6:]}"
+            nsn = "88" + "".join(str(self.rng.randint(0, 9)) for _ in range(n - 2))
+            p = f"+{dial} {nsn[:4]} {nsn[4:]}" if n == 8 else f"+{dial} {nsn[:3]} {nsn[3:6]} {nsn[6:]}"
             if p not in self.used_phones:
                 self.used_phones.add(p)
                 return p
@@ -455,7 +484,7 @@ def pick_hero_flight(g: Generator, home: str = "NBO") -> tuple[Route, datetime, 
     out; only the departure time is then off-schedule, which nothing on screen
     shows. Other airports are a last resort for a refreshed schedule without home.
     """
-    soonest = g.anchor + timedelta(hours=1)
+    soonest = g.anchor + timedelta(hours=4)  # leaves time to present after `make demo`
     latest = g.anchor + timedelta(hours=11)
     for pool in ([r for r in g.routes if r.origin == home], g.routes):
         candidates = [(r.next_departure(soonest), r) for r in pool]
@@ -525,7 +554,8 @@ def generate(conn, n_bookings: int, n_shippers: int, seed: int, planted_fraction
     bookings.append(hero)
     # R1's second booking: gemstones, paid by the shared payer account
     rt = g.route_from("NBO", ["JNB", "HKG"])
-    b, d = g._timing(rt, r1, lead_target=30)
+    b = hero_booked - timedelta(days=9, hours=3)  # flew last week; the seeded history refuses it
+    d = rt.next_departure(b + timedelta(hours=30))
     x = g.booking(r1, "valuables", "Gemstones", rt, g._physical("valuables", weight=2.0, vpk=45000),
                   "third_party", b, d, payment_ref=ring_payer)
     x["_patterns"] = ["new_shipper_high_value", "shared_contact_flagged"]
@@ -713,19 +743,31 @@ def commodity_cfg_vague() -> list[str]:
 
 # ---------------------------------------------------------------- history
 
+SEED_REVIEWER = "Cargo security desk"
 REJECT_NOTES = {
-    "linked_to_flagged_shipper": "Shares contact details with a shipper already under review. Not accepted.",
-    "watchlist_shipper": "Shipper is on the internal watchlist. Not accepted.",
-    "new_shipper_high_value": "New account could not show proof of ownership for the goods. Not accepted.",
-    "late_booking_risky_payment": "Payer could not be identified before cut-off. Booking cancelled.",
-    "vague_description_dense": "Contents did not match the declaration at acceptance. Refused.",
-    "vague_description_high_value": "Shipper could not describe the goods or show an invoice. Not accepted.",
-    "weight_volume_mismatch": "Contents did not match the declaration at acceptance. Refused.",
-    "implausible_weight": "Contents did not match the declaration at acceptance. Refused.",
+    "shipper_previously_rejected": ["Same shipper as an earlier refused booking. Not accepted.",
+                                    "Repeat of a shipment refused last week. Not accepted."],
+    "linked_to_flagged_shipper": ["Shares contact details with a shipper already under review. Not accepted.",
+                                  "Phone number matches a refused shipper. Booking cancelled."],
+    "watchlist_shipper": ["Shipper is on the internal watchlist. Not accepted."],
+    "new_shipper_high_value": ["New account could not show proof of ownership for the goods. Not accepted.",
+                               "No invoice or export permit for the goods. Refused.",
+                               "Account opened two weeks ago, no trading history. Refused."],
+    "late_booking_risky_payment": ["Payer could not be identified before cut-off. Booking cancelled.",
+                                   "Cash payer would not give ID. Not accepted."],
+    "vague_description_dense": ["Contents did not match the declaration at acceptance. Refused.",
+                                "Shipper would not open the boxes for inspection. Refused."],
+    "vague_description_high_value": ["Shipper could not describe the goods or show an invoice. Not accepted."],
+    "weight_volume_mismatch": ["Contents did not match the declaration at acceptance. Refused.",
+                               "Weighed and measured at acceptance: not what was declared. Refused."],
+    "implausible_weight": ["Declared as documents, 400 kg on the scale. Refused.",
+                           "Contents did not match the declaration at acceptance. Refused."],
 }
 APPROVE_NOTES = {
-    "new_shipper_high_value": "New importer: invoice and import permit checked, shipper visited. Fine to fly.",
-    "default": "Called the shipper and checked the invoice. Fine to fly.",
+    "new_shipper_high_value": ["New importer: invoice and import permit checked, shipper visited. Fine to fly.",
+                               "New account, but the bank and the consignee confirmed the deal. Approved."],
+    "default": ["Called the shipper and checked the invoice. Fine to fly.",
+                "Documents checked at the counter. Approved."],
 }
 
 
@@ -756,19 +798,55 @@ def backfill_past_reviews(conn, now: datetime, rng: random.Random | None = None)
         decided = booked + timedelta(hours=min(row["lead_time_hours"] * rng.uniform(0.2, 0.7), 6))
         if row["planted"]:
             decision = "reject"
-            note = next((REJECT_NOTES[h] for h in hits if h in REJECT_NOTES),
-                        "Could not verify the shipper before cut-off. Not accepted.")
+            options = next((REJECT_NOTES[h] for h in hits if h in REJECT_NOTES),
+                           ["Could not verify the shipper before cut-off. Not accepted."])
         else:
             decision = "approve"
-            note = next((APPROVE_NOTES[h] for h in hits if h in APPROVE_NOTES), APPROVE_NOTES["default"])
+            options = next((APPROVE_NOTES[h] for h in hits if h in APPROVE_NOTES), APPROVE_NOTES["default"])
+        note = rng.choice(options)
         conn.execute(
             "INSERT INTO review_decision (booking_id, decision, note, decided_by, decided_at) VALUES (?, ?, ?, ?, ?)",
-            (row["id"], decision, note, "Cargo security desk", db.iso(decided)))
+            (row["id"], decision, note, SEED_REVIEWER, db.iso(decided)))
         conn.execute("UPDATE booking SET status = ? WHERE id = ?",
                      ("rejected" if decision == "reject" else "accepted", row["id"]))
+        if decision == "reject":  # refused shipments carry no cover
+            conn.execute("UPDATE policy SET status = 'cancelled' WHERE booking_id = ? AND status = 'active'", (row["id"],))
         n += 1
     conn.commit()
     return n
+
+
+def prune_stale_seed_decisions(conn) -> int:
+    """Drop seed-made decisions on bookings that no longer score HIGH (a later
+    decision elsewhere changed their score), so every decided booking is HIGH."""
+    stale = [r[0] for r in conn.execute(
+        "SELECT d.booking_id FROM review_decision d JOIN risk_score r ON r.booking_id = d.booking_id "
+        "WHERE d.decided_by = ? AND r.band != 'HIGH'", (SEED_REVIEWER,))]
+    for bid in stale:
+        conn.execute("DELETE FROM review_decision WHERE booking_id = ? AND decided_by = ?", (bid, SEED_REVIEWER))
+        conn.execute("UPDATE booking SET status = 'accepted' WHERE id = ?", (bid,))
+    conn.commit()
+    return len(stale)
+
+
+def settle_reviews(conn, model, now: datetime, rng: random.Random | None = None, max_rounds: int = 8) -> None:
+    """Score, add past decisions, and repeat until the two agree.
+
+    Decisions feed the score (a rejection flags the shipper, an approval clears
+    it), and scores decide which bookings need a decision, so one pass is not
+    enough. Each round only removes stale seed decisions or adds missing ones.
+    """
+    from . import risk
+
+    rng = rng or random.Random(1)
+    for _ in range(max_rounds):
+        risk.score_all(conn, model)
+        changed = prune_stale_seed_decisions(conn) + backfill_past_reviews(conn, now, rng)
+        if not changed:
+            return
+    risk.score_all(conn, model)
+    if prune_stale_seed_decisions(conn):
+        risk.score_all(conn, model)
 
 
 
@@ -809,11 +887,6 @@ def seed_history(conn, summary: dict[str, Any], seed: int, policy_share: float, 
             (row["id"], q.sum_insured_usd, q.premium_usd, secrets.token_urlsafe(16), db.iso(issued_at)),
         )
         issued += 1
-
-    # Past review decisions: HIGH bookings whose flights have already gone were
-    # decided by a person at the time, so the live queue only holds current work.
-    # (The seed knows which bookings it planted; the reviewers' calls follow that.)
-    backfill_past_reviews(conn, anchor, rng)
 
     awbs = [r["awb"] for r in conn.execute("SELECT awb FROM booking").fetchall()]
     prefix = config.awb_prefix()
@@ -883,17 +956,18 @@ def run(n_bookings: int | None = None, n_shippers: int | None = None, seed: int 
         score: bool = True, quiet: bool = False, anchor: datetime | None = None) -> dict[str, Any]:
     cfg = config.settings()["seed"]
     n_bookings = n_bookings or cfg["bookings"]
-    n_shippers = n_shippers or cfg["shippers"]
+    # Keep the mix believable at any size: about 7.5 bookings per shipper.
+    n_shippers = n_shippers or max(cfg["shippers"], round(n_bookings / 7.5))
     seed = cfg["random_seed"] if seed is None else seed
     anchor = anchor or db.utcnow()
 
+    # Build the database, model and snapshot beside the live ones and swap them in
+    # only when everything has worked, so a failed reseed leaves the old demo intact.
     live = config.db_path()
     path = live.with_name(live.name + ".building")
-    for p in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
-        if p.exists():
-            p.unlink()
-    # A reseed replaces the reset snapshot and the model; never let a stale pair outlive it.
-    for p in (config.snapshot_path(), config.model_path()):
+    model_tmp = config.model_path().with_name(config.model_path().name + ".building")
+    snap_tmp = config.snapshot_path().with_name(config.snapshot_path().name + ".building")
+    for p in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm"), model_tmp, snap_tmp):
         if p.exists():
             p.unlink()
     conn = db.connect(path)
@@ -908,12 +982,12 @@ def run(n_bookings: int | None = None, n_shippers: int | None = None, seed: int 
     if score:
         from . import anomaly, evaluation, risk
         model = anomaly.train(conn)
-        anomaly.save(model)
+        anomaly.save(model, model_tmp)
         risk.score_all(conn, model)
         seed_history(conn, summary, seed, cfg["history_policy_share"], cfg["history_verifications"])
-        # Past reviewer rejections are facts the graph uses, so score once more with
-        # them in place. This is exactly what `make train` reproduces later.
-        risk.score_all(conn, model)
+        # Past review decisions for HIGH bookings whose flights have gone, scored
+        # until decisions and scores agree. `make train` does the same.
+        settle_reviews(conn, model, anchor, random.Random(seed + 11))
         summary["samples"] = write_samples(conn, summary)
 
     db.set_meta(conn, "seeded_at", db.iso(db.utcnow()))
@@ -933,6 +1007,8 @@ def run(n_bookings: int | None = None, n_shippers: int | None = None, seed: int 
         "samples": summary.get("samples", []),
     })
     conn.commit()
+    if score:
+        db.snapshot(conn, snap_tmp)
     # Copy into the live file with the backup API: works while the app holds it
     # open (Windows will not let us delete it then), and readers see a whole database.
     db.copy_database(conn, live)
@@ -941,8 +1017,12 @@ def run(n_bookings: int | None = None, n_shippers: int | None = None, seed: int 
         if p.exists():
             p.unlink()
     if score:
-        with db.connect(live) as c:
-            db.snapshot(c)
+        os.replace(model_tmp, config.model_path())
+        os.replace(snap_tmp, config.snapshot_path())
+    else:  # unscored data: an old model or snapshot would no longer match it
+        for p in (config.model_path(), config.snapshot_path()):
+            if p.exists():
+                p.unlink()
 
     if not quiet:
         _print_summary(summary)

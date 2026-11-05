@@ -290,14 +290,15 @@ def _rejected_by_shipper(conn: sqlite3.Connection) -> dict[int, set[int]]:
     return out
 
 
-def _high_own_from_scores(conn: sqlite3.Connection, shipper_id: int) -> set[int]:
-    """The shipper's bookings that score HIGH on their own evidence (stored scores)."""
+def _high_own_from_scores(conn: sqlite3.Connection, shipper_id: int, cleared: set[int] | None = None) -> set[int]:
+    """The shipper's bookings that score HIGH on their own evidence (stored scores),
+    leaving out any a reviewer approved."""
     rcfg = config.rules_config()
     graph_ids = set(rcfg.get("graph_rules") or [])
     cap = int(rcfg["anomaly"]["max_score_without_rule_hit"])
     high_min = int(rcfg["bands"]["HIGH"][0])
     out = set()
-    cleared = graph.approved_bookings(conn)
+    cleared = graph.approved_bookings(conn) if cleared is None else cleared
     for r in conn.execute(
         "SELECT b.id, r.rule_hits_json FROM booking b JOIN risk_score r ON r.booking_id = b.id WHERE b.shipper_id = ?",
         (shipper_id,),
@@ -307,20 +308,45 @@ def _high_own_from_scores(conn: sqlite3.Connection, shipper_id: int) -> set[int]
     return out
 
 
-def _other_flag(booking_id: int, high_own: set[int], rejected: set[int]) -> str | None:
+def _other_flag(booking_id: int, high_own: set[int], rejected: set[int]) -> dict[str, bool]:
     """What the shipper's *other* bookings say (never this booking itself)."""
-    if rejected - {booking_id}:
-        return "another booking that was rejected after review"
-    if high_own - {booking_id}:
-        return "another booking that scored HIGH"
-    return None
+    return {"rejected": bool(rejected - {booking_id}), "high": bool(high_own - {booking_id})}
+
+
+def rescore_bookings(conn: sqlite3.Connection, booking_ids: Sequence[int], model: AnomalyModel) -> int:
+    """Rescore several bookings in one pass (context built once, not per booking)."""
+    ids = list(dict.fromkeys(booking_ids))
+    if not ids:
+        return 0
+    rules = load_rules()
+    flagged = set(graph.flagged_shippers(conn))
+    idx = graph.LinkIndex(conn)
+    rejected = _rejected_by_shipper(conn)
+    cleared = graph.approved_bookings(conn)
+    rows = conn.execute(_BOOKING_SQL + f" WHERE b.id IN ({','.join('?' for _ in ids)})", ids).fetchall()
+    high_cache: dict[int, set[int]] = {}
+    feats = []
+    for row in rows:
+        sid = row["shipper_id"]
+        if sid not in high_cache:
+            high_cache[sid] = _high_own_from_scores(conn, sid, cleared)
+        other = _other_flag(row["id"], high_cache[sid], rejected.get(sid, set()))
+        feats.append(booking_features(row, _shipper_of(row), model.route_freq, idx.linked_flagged(sid, flagged), other))
+    when = db.iso(db.utcnow())
+    for row, f, an in zip(rows, feats, model.score(feats)):
+        res = combine(evaluate(rules, f), an)
+        _write(conn, row["id"], res, when)
+        _set_status(conn, row["id"], res.band)
+    conn.commit()
+    return len(rows)
 
 
 def rescore_after_flag(conn: sqlite3.Connection, shipper_id: int, model: AnomalyModel,
                        skip_booking: int | None = None) -> int:
-    """A shipper has just been flagged (a HIGH booking, or a reviewer's reject).
+    """A shipper's standing just changed: a booking scored HIGH, or a reviewer
+    rejected or approved one.
 
-    Rescore the open bookings that the new flag affects: the shipper's own other
+    Rescore the open bookings that this affects: the shipper's own other
     bookings and those of every shipper sharing a phone, email or payer account
     with them. Only bookings nobody has decided on yet and whose flight is still
     to go. Returns how many were rescored.
@@ -328,19 +354,18 @@ def rescore_after_flag(conn: sqlite3.Connection, shipper_id: int, model: Anomaly
     idx = graph.LinkIndex(conn)
     shippers = {shipper_id} | set(idx.neighbours(shipper_id))
     now = db.utcnow()
-    n = 0
-    for r in conn.execute(
-        f"SELECT b.id, b.booked_at, b.lead_time_hours FROM booking b WHERE b.shipper_id IN "
-        f"({','.join('?' for _ in shippers)}) AND NOT EXISTS (SELECT 1 FROM review_decision d WHERE d.booking_id = b.id)",
-        sorted(shippers),
-    ).fetchall():
-        if r["id"] == skip_booking:
-            continue
-        if db.parse_dt(r["booked_at"]) + timedelta(hours=r["lead_time_hours"]) <= now:
-            continue
-        screen_booking(conn, r["id"], model)
-        n += 1
-    return n
+    ids = [
+        r["id"]
+        for r in conn.execute(
+            f"SELECT b.id, b.booked_at, b.lead_time_hours FROM booking b WHERE b.shipper_id IN "
+            f"({','.join('?' for _ in shippers)}) AND NOT EXISTS "
+            f"(SELECT 1 FROM review_decision d WHERE d.booking_id = b.id)",
+            sorted(shippers),
+        ).fetchall()
+        if r["id"] != skip_booking
+        and db.parse_dt(r["booked_at"]) + timedelta(hours=r["lead_time_hours"]) > now
+    ]
+    return rescore_bookings(conn, ids, model)
 
 
 def explain(conn: sqlite3.Connection, booking_id: int) -> dict[str, Any] | None:

@@ -20,6 +20,16 @@ const day = (iso) => parseIso(iso).toLocaleDateString("en-GB", { day: "numeric",
 const dayShort = (iso) => parseIso(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 const stamp = (iso) => parseIso(iso).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 const resClass = (r) => String(r || "").replace(/\s+/g, "_");
+// "Departs Thu 5 Nov, 23:40 (in 4 h 48 min)" in the viewer's local time.
+function departs(iso) {
+  const t = parseIso(iso);
+  const when = t.toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const mins = Math.round((t - new Date()) / 60000);
+  if (mins <= 0) return { text: `Departed ${when}`, gone: true };
+  const h = Math.floor(mins / 60), m = mins % 60;
+  const rel = h >= 48 ? `in ${Math.round(h / 24)} days` : h ? `in ${h} h ${m} min` : `in ${m} min`;
+  return { text: `Departs ${when} (${rel})`, gone: false };
+}
 const STATUS = { accepted: "Accepted", in_review: "In review queue", on_hold: "On hold", rejected: "Rejected", new: "New" };
 const DECISION = { approve: "Approved", hold: "On hold", reject: "Rejected" };
 const KYC = { verified: "Verified", pending: "Pending", failed: "Failed (watchlist)" };
@@ -65,7 +75,8 @@ async function loadStats() {
   const p = state.stats;
   setKpi("#k-screened", num(s.screened), p && p.screened);
   setKpi("#k-flagged", num(s.flagged_high), p && p.flagged_high);
-  $("#k-flagged-foot").textContent = `HIGH: ${num(s.review_pending)} waiting now, ${num(s.review_decided)} decided · ${num(s.flagged_medium)} MEDIUM`;
+  const held = s.review_on_hold ? `, ${num(s.review_on_hold)} on hold` : "";
+  $("#k-flagged-foot").textContent = `HIGH: ${num(s.review_pending - s.review_on_hold)} waiting${held}, ${num(s.review_decided)} decided · ${num(s.flagged_medium)} MEDIUM`;
   setKpi("#k-policies", num(s.policies_issued), p && p.policies_issued);
   $("#k-policies-foot").textContent = `${compactUsd(s.sum_insured_usd)} top-up cover written`;
   setKpi("#k-premium", usd(s.premium_written_usd), p && p.premium_written_usd);
@@ -189,6 +200,7 @@ const BAND_COLOUR = { LOW: "#0f7b4f", MEDIUM: "#b54708", HIGH: "#b42318" };
 
 function renderDetail(d) {
   const b = d.booking, s = d.shipper, r = d.risk, q = d.quote;
+  const dep = departs(b.departure_at);
   const colour = BAND_COLOUR[r.band];
   const pointsTotal = r.reasons.reduce((a, x) => a + x.points, 0);
   const capNote = pointsTotal > r.score
@@ -206,6 +218,7 @@ function renderDetail(d) {
       <div>
         <h2 class="d-awb" id="d-awb">${esc(b.awb)}</h2>
         <div class="d-route">${esc(b.origin)} → ${esc(b.destination)} · flight ${day(b.flight_date)} · ${esc(STATUS[b.status] || b.status)}</div>
+        <div class="d-departs ${dep.gone ? "gone" : ""}">${esc(dep.text)}${dep.gone && b.status === "in_review" ? " · still waiting for a decision" : ""}</div>
       </div>
       <button class="close" id="close" aria-label="Close booking">×</button>
     </div>
@@ -275,7 +288,7 @@ function coverHtml(d) {
       <div class="policy">
         <img src="${p.qr_png}" alt="QR code that opens the verification page for this cover">
         <div class="actions">
-          <div><b>${esc(p.policy_no)}</b> · active${p.cover_ends ? ` until ${day(p.cover_ends)}` : ""}</div>
+          <div><b>${esc(p.policy_no)}</b> · ${p.cover_ended ? `ended ${day(p.cover_ends)}` : `active${p.cover_ends ? ` until ${day(p.cover_ends)}` : ""}`}</div>
           <div class="muted">Sum insured ${usd(p.sum_insured_usd, 2)} · premium ${usd(p.premium_usd, 2)}</div>
           <button class="btn primary small" id="scan-qr">Scan the QR (opens what a phone would)</button>
           <button class="btn small" id="send-cert">Send the certificate to the chat</button>
@@ -398,6 +411,7 @@ async function loadReview() {
         ${scoreHtml(b.score, b.band)}
       </div>
       <div class="muted">${esc(b.commodity_text)} · ${num(b.weight_kg, b.weight_kg < 100 ? 1 : 0)} kg · ${usd(b.declared_value_usd)}${b.status === "on_hold" ? " · <b>on hold</b>" : ""}</div>
+      <div class="r-departs ${departs(b.departure_at).gone ? "gone" : ""}">${esc(departs(b.departure_at).text)}</div>
       <ul>${b.reasons.filter((x) => x.kind === "rule").map((x) => `<li>${esc(x.text)}</li>`).join("")}</ul>
       <button class="link open">Open booking and fraud graph</button>
       <textarea placeholder="Note for the file (required to reject)" maxlength="500" aria-label="Note for ${esc(b.awb)}"></textarea>
@@ -596,6 +610,7 @@ async function init() {
   try {
     const demo = await ensureDemo();
     $("#airline").textContent = demo.airline;
+    if (demo.data_label) $("#data-badge").textContent = demo.data_label.replace(/\.$/, "");
     await Promise.all([loadStats(), loadBookings(), greet()]);
   } catch (e) {
     $("#booking-rows").innerHTML = `<tr><td colspan="8">Couldn't reach the demo database: ${esc(e.message)}. Run <code>make seed</code>, then reload.</td></tr>`;

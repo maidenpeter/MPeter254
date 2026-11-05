@@ -125,24 +125,25 @@ def flagged_shippers(conn: sqlite3.Connection, include_scores: bool = True) -> d
 
     flagged: dict[int, str] = {}
     for r in conn.execute("SELECT id FROM shipper WHERE kyc_status = 'failed'"):
-        flagged[r["id"]] = "On the internal watchlist (KYC failed)"
+        flagged[r["id"]] = "on the internal watchlist (KYC failed)"
     for r in conn.execute(
         "SELECT DISTINCT b.shipper_id FROM review_decision d JOIN booking b ON b.id = d.booking_id "
         "WHERE d.decision = 'reject'"
     ):
-        flagged.setdefault(r["shipper_id"], "A booking was rejected after review")
+        flagged.setdefault(r["shipper_id"], "a reviewer refused one of its bookings")
     if not include_scores:
         return flagged
     cleared = approved_bookings(conn)
     for r in conn.execute(
-        "SELECT b.id, b.shipper_id, r.rule_hits_json FROM risk_score r JOIN booking b ON b.id = r.booking_id "
+        "SELECT b.id, b.awb, b.shipper_id, r.rule_hits_json FROM risk_score r JOIN booking b ON b.id = r.booking_id "
         "WHERE r.score >= ?",
         (high_min,),
     ):
         if r["shipper_id"] in flagged or r["id"] in cleared:
             continue
         if base_score(json.loads(r["rule_hits_json"]), graph_ids, cap) >= high_min:
-            flagged[r["shipper_id"]] = "Has a HIGH-risk booking on its own evidence"
+            awb = r["awb"]
+            flagged[r["shipper_id"]] = f"booking {awb[:3]}-{awb[3:]} scored HIGH on its own (before shared contacts)"
     return flagged
 
 

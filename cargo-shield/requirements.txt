@@ -18,3 +18,5 @@ zxing-cpp>=2.2
 # tests
 pytest>=8.0
 httpx>=0.27
+# checks that generated phone numbers are unassigned (tests only)
+phonenumbers>=8.13

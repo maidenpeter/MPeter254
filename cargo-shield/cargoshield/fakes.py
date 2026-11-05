@@ -115,7 +115,7 @@ def _render(spec: FakeSpec, prefix: str, anchor: datetime) -> Image.Image:
     if spec.filename == "fake_cert_lookalike_qr.png":
         return documents.draw_certificate(
             "Certificate of cargo insurance", "CSP-0662930", number, "Bahari Bullion Trading",
-            "NBO to HKG", _d(anchor, 6), "Gold dore", 1950000, 29250, _d(anchor, 3),
+            "NBO to HKG", _d(anchor, 6), "Gold dore", 1950000, 29250, _d(anchor, -1),
             qr_data="https://cargoshield-verify.example/p/9KX2PQ",
             verify_hint="cargoshield-verify.example", issuer="CargoShield cover")
     raise ValueError(spec.filename)

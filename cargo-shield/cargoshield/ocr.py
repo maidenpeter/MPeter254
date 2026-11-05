@@ -56,8 +56,10 @@ def load_image(data: bytes) -> Image.Image:
         raise BadImage("image is larger than 8 MB")
     try:
         img = Image.open(io.BytesIO(data))  # reads the header only
-        if img.width * img.height > MAX_PIXELS:
+        if img.width * img.height > MAX_PIXELS or max(img.size) > 10_000:
             raise BadImage(f"image is {img.width}x{img.height} pixels; please send a smaller photo")
+        if min(img.size) < 40 or max(img.size) / max(min(img.size), 1) > 8:
+            raise BadImage(f"image is {img.width}x{img.height} pixels, not the shape of a document")
         img.load()
     except BadImage:
         raise
@@ -84,8 +86,10 @@ def _prep(img: Image.Image) -> Image.Image:
         scale = 3000 / g.width
         g = g.resize((3000, int(g.height * scale)), Image.LANCZOS)
     if g.width < 1400:
-        scale = 1400 / g.width
-        g = g.resize((int(g.width * scale), int(g.height * scale)), Image.LANCZOS)
+        # Upscale small photos for OCR, but never past ~6 megapixels.
+        scale = min(1400 / g.width, (6_000_000 / (g.width * g.height)) ** 0.5)
+        if scale > 1:
+            g = g.resize((int(g.width * scale), int(g.height * scale)), Image.LANCZOS)
     return ImageOps.autocontrast(g)
 
 

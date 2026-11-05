@@ -8,6 +8,7 @@ and invented; they do not copy any real airline's or insurer's documents.
 from __future__ import annotations
 
 import io
+import textwrap
 from datetime import date
 from typing import Iterable
 
@@ -168,10 +169,9 @@ def draw_certificate(
         y += step
     if basis:
         d.text((70, y + 4), "Basis of cover", font=font(22), fill=MUTED)
-        d.text((420, y + 4), basis[:60], font=font(22), fill=INK)
-        if len(basis) > 60:
-            d.text((420, y + 34), basis[60:120], font=font(22), fill=INK)
-        y += 70
+        for i, line in enumerate(textwrap.wrap(basis, 58)[:3]):
+            d.text((420, y + 4 + i * 30), line, font=font(22), fill=INK)
+        y += 100
 
     if qr_data:
         qr = qr_image(qr_data, box_size=9).resize((420, 420), Image.NEAREST)
