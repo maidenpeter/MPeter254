@@ -92,4 +92,5 @@ def test_online_limit_uses_the_priced_sum_insured():
 
 
 def test_stats_carry_the_seed_time(client):
-    assert client.get("/api/stats").json()["seeded_at"]
+    seeded = client.get("/api/stats").json()["seeded_at"]
+    assert seeded and seeded == client.get("/api/demo").json()["seeded_at"] and '"' not in seeded
