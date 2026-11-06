@@ -66,7 +66,10 @@ cover:
   # underwriter) when the shipper isn't KYC-verified or is flagged, for these
   # commodity classes (specie needs its own wording), or when any of these rules fired.
   refer_classes: [valuables]
+  # Above this sum insured a person signs off, whatever the score.
+  maximum_sum_insured_usd: 250000
   refer_if_rules:
+    - value_density_outlier
     - new_shipper_high_value
     - vague_description_dense
     - vague_description_high_value

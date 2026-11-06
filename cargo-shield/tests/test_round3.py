@@ -174,7 +174,7 @@ def test_review_queue_is_soonest_departure_first(client):
 def test_verify_page_labels_every_field(client):
     demo = client.get("/api/demo").json()
     pol = client.post("/api/policies", json={"booking_id": demo["hero_clean_booking_id"]}).json()
-    html = client.get(pol["verify_url"].replace("http://testserver", ""), headers={"accept": "text/html"}).text
+    html = client.get(pol["verify_url"].replace("http://localhost", ""), headers={"accept": "text/html"}).text
     assert "cover_ends" not in html and "Cover ends" in html
 
 

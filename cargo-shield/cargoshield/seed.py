@@ -8,8 +8,9 @@ fake documents, then (unless --no-score) trains the anomaly model, scores every
 booking, pre-loads some history and saves the demo start snapshot.
 
 Everything is generated. Names are invented, emails use the reserved .example
-domain, and phone numbers put a 0 straight after the country code, which no
-numbering plan in the demo countries issues, so none can reach a real phone.
+domain, and phone numbers sit in the 88 block after the country code, which
+Google's libphonenumber data lists as unassigned in every demo country (a test
+checks it), so they should not reach a real phone.
 """
 
 from __future__ import annotations
@@ -440,7 +441,9 @@ class Generator:
             **phys,
             "payment_method": payment,
             "payment_ref": payment_ref,
-            "booked_at": db.iso(booked),
+            # Round the lead time, then move the booking time to match, so booked_at +
+            # lead_time is exactly the scheduled departure.
+            "booked_at": db.iso(dep - timedelta(hours=round((dep - booked).total_seconds() / 3600.0, 1))),
             "lead_time_hours": round((dep - booked).total_seconds() / 3600.0, 1),
             "status": "new",
             "_patterns": [],
@@ -481,8 +484,8 @@ def pick_hero_flight(g: Generator, home: str = "NBO") -> tuple[Route, datetime, 
     Prefer the next scheduled departure from home within 11 hours, ideally to
     Hong Kong or Johannesburg. If home has nothing that soon (e.g. a quiet
     Thursday), use a home route that flies today and set the departure 6 hours
-    out; only the departure time is then off-schedule, which nothing on screen
-    shows. Other airports are a last resort for a refreshed schedule without home.
+    out; only the departure time is then off the timetable (the drawer shows
+    it). Other airports are a last resort for a refreshed schedule without home.
     """
     soonest = g.anchor + timedelta(hours=4)  # leaves time to present after `make demo`
     latest = g.anchor + timedelta(hours=11)
@@ -752,7 +755,7 @@ REJECT_NOTES = {
     "watchlist_shipper": ["Shipper is on the internal watchlist. Not accepted."],
     "new_shipper_high_value": ["New account could not show proof of ownership for the goods. Not accepted.",
                                "No invoice or export permit for the goods. Refused.",
-                               "Account opened two weeks ago, no trading history. Refused."],
+                               "Account opened {age} before booking, no trading history. Refused."],
     "late_booking_risky_payment": ["Payer could not be identified before cut-off. Booking cancelled.",
                                    "Cash payer would not give ID. Not accepted."],
     "vague_description_dense": ["Contents did not match the declaration at acceptance. Refused.",
@@ -760,7 +763,7 @@ REJECT_NOTES = {
     "vague_description_high_value": ["Shipper could not describe the goods or show an invoice. Not accepted."],
     "weight_volume_mismatch": ["Contents did not match the declaration at acceptance. Refused.",
                                "Weighed and measured at acceptance: not what was declared. Refused."],
-    "implausible_weight": ["Declared as documents, 400 kg on the scale. Refused.",
+    "implausible_weight": ["Declared as {goods}, {weight} on the scale. Refused.",
                            "Contents did not match the declaration at acceptance. Refused."],
 }
 APPROVE_NOTES = {
@@ -782,9 +785,9 @@ def backfill_past_reviews(conn, now: datetime, rng: random.Random | None = None)
     rng = rng or random.Random(0)
     rows = conn.execute(
         """
-        SELECT b.id, b.booked_at, b.lead_time_hours, r.rule_hits_json,
-               EXISTS (SELECT 1 FROM seed_truth t WHERE t.booking_id = b.id) AS planted
-        FROM booking b JOIN risk_score r ON r.booking_id = b.id
+        SELECT b.id, b.booked_at, b.lead_time_hours, b.weight_kg, b.commodity_text, s.created_at AS s_created,
+               r.rule_hits_json, EXISTS (SELECT 1 FROM seed_truth t WHERE t.booking_id = b.id) AS planted
+        FROM booking b JOIN risk_score r ON r.booking_id = b.id JOIN shipper s ON s.id = b.shipper_id
         WHERE b.status = 'in_review'
         """
     ).fetchall()
@@ -803,7 +806,11 @@ def backfill_past_reviews(conn, now: datetime, rng: random.Random | None = None)
         else:
             decision = "approve"
             options = next((APPROVE_NOTES[h] for h in hits if h in APPROVE_NOTES), APPROVE_NOTES["default"])
-        note = rng.choice(options)
+        age_days = int((booked - db.parse_dt(row["s_created"])).total_seconds() // 86400)
+        note = rng.choice(options).format(
+            age=("1 day" if age_days == 1 else f"{age_days} days"),
+            goods=row["commodity_text"].lower(),
+            weight=f"{row['weight_kg']:,.0f} kg")
         conn.execute(
             "INSERT INTO review_decision (booking_id, decision, note, decided_by, decided_at) VALUES (?, ?, ?, ?, ?)",
             (row["id"], decision, note, SEED_REVIEWER, db.iso(decided)))

@@ -41,26 +41,20 @@ def test_vague_dense_cargo_is_not_counted_twice(conn):
 
 
 def test_reviewer_approval_clears_a_shipper(conn):
-    """A HIGH booking a person approved must not flag the shipper, or count against their other bookings."""
-    rows = conn.execute(
-        """SELECT b.shipper_id FROM review_decision d JOIN booking b ON b.id = d.booking_id
-           WHERE d.decision = 'approve'"""
-    ).fetchall()
-    assert rows, "the seed should include approved HIGH bookings"
-    flagged = graph.flagged_shippers(conn)
-    for (sid,) in rows:
-        other_open_high = conn.execute(
-            """SELECT COUNT(*) FROM booking b JOIN risk_score r ON r.booking_id = b.id
-               WHERE b.shipper_id = ? AND r.band = 'HIGH'
-               AND NOT EXISTS (SELECT 1 FROM review_decision d WHERE d.booking_id = b.id AND d.decision = 'approve')""",
-            (sid,)).fetchone()[0]
-        kyc = conn.execute("SELECT kyc_status FROM shipper WHERE id = ?", (sid,)).fetchone()[0]
-        if other_open_high == 0 and kyc != "failed":
-            assert sid not in flagged, sid
-        for (hits,) in conn.execute("SELECT r.rule_hits_json FROM booking b JOIN risk_score r ON r.booking_id = b.id "
-                                    "WHERE b.shipper_id = ?", (sid,)):
-            if other_open_high == 0:
-                assert "shipper_has_other_high_booking" not in hits
+    """A HIGH booking a person approved must not flag the shipper (built here, so it
+    doesn't depend on what the seed happened to contain at the hour it ran)."""
+    clean = db.get_meta(conn, "demo")["hero_clean_booking_id"]
+    sid = conn.execute("SELECT shipper_id FROM booking WHERE id = ?", (clean,)).fetchone()[0]
+    hits = json.dumps([{"id": "new_shipper_high_value", "points": 45, "kind": "rule"},
+                       {"id": "late_booking_risky_payment", "points": 40, "kind": "rule"}])
+    conn.execute("UPDATE risk_score SET score = 85, band = 'HIGH', rule_hits_json = ? WHERE booking_id = ?", (hits, clean))
+    conn.commit()
+    assert sid in graph.flagged_shippers(conn)
+    conn.execute("INSERT INTO review_decision (booking_id, decision, note, decided_by, decided_at) "
+                 "VALUES (?, 'approve', 'Checked', 'Test', '2026-01-01T00:00:00')", (clean,))
+    conn.commit()
+    assert sid not in graph.flagged_shippers(conn)
+    assert clean in graph.approved_bookings(conn)
 
 
 def test_reject_flags_the_shipper_and_rescores_linked_open_bookings(client, conn):
@@ -285,17 +279,26 @@ def test_reviewer_notes_match_the_booking(conn):
 
 
 def test_referred_quotes_cannot_be_bought(client, conn):
-    row = conn.execute(
-        "SELECT b.id FROM booking b JOIN risk_score r ON r.booking_id = b.id JOIN shipper s ON s.id = b.shipper_id "
-        "WHERE r.band = 'MEDIUM' AND b.status = 'accepted' AND s.kyc_status != 'verified' "
-        "AND datetime(b.booked_at, '+' || CAST(b.lead_time_hours AS TEXT) || ' hours') > datetime('now') LIMIT 1"
-    ).fetchone()
-    if row is None:
-        pytest.skip("no future MEDIUM booking from an unverified shipper in this seed")
-    q = client.get(f"/api/quote/{row['id']}").json()
-    assert q["eligible"] and not q["bindable"] and q["referral_reasons"]
-    r = client.post("/api/policies", json={"booking_id": row["id"]})
+    sid = conn.execute("SELECT id FROM shipper WHERE kyc_status = 'pending' AND is_planted_fraud = 0 LIMIT 1").fetchone()[0]
+    body = {"shipper_id": sid, "origin": "NBO", "destination": "JNB", "commodity_text": "Laptop computers",
+            "pieces": 4, "weight_kg": 50, "volume_m3": 0.25, "declared_value_usd": 40000,
+            "payment_method": "card", "lead_time_hours": 48}
+    bid = client.post("/api/bookings", json=body).json()["booking"]["id"]
+    q = client.get(f"/api/quote/{bid}").json()
+    assert q["eligible"] and not q["bindable"] and any("KYC" in r for r in q["referral_reasons"])
+    r = client.post("/api/policies", json={"booking_id": bid})
     assert r.status_code == 409 and "underwriter" in r.json()["detail"]
+
+
+def test_sum_insured_over_the_online_limit_is_referred(client, conn):
+    sid = conn.execute("SELECT shipper_id FROM booking WHERE id = ?",
+                       (db.get_meta(conn, "demo")["hero_clean_booking_id"],)).fetchone()[0]
+    body = {"shipper_id": sid, "origin": "NBO", "destination": "JNB", "commodity_text": "Pharmaceuticals",
+            "pieces": 25, "weight_kg": 500, "volume_m3": 2.5, "declared_value_usd": 50_000_000,
+            "payment_method": "credit_account", "lead_time_hours": 48}
+    bid = client.post("/api/bookings", json=body).json()["booking"]["id"]
+    q = client.get(f"/api/quote/{bid}").json()
+    assert not q["bindable"] and any("online limit" in r or "risk reasons" in r for r in q["referral_reasons"])
 
 
 def test_one_active_policy_per_booking(conn):

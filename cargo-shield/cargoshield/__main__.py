@@ -62,7 +62,8 @@ def cmd_train(args) -> int:
     anomaly.save(model)
     # New rules can send already-departed flights to review: give them the decision a
     # reviewer would have made at the time, scoring until the two agree (as the seed does).
-    seed.settle_reviews(conn, model, db.utcnow())
+    anchor = db.get_meta(conn, "anchor")
+    seed.settle_reviews(conn, model, db.parse_dt(anchor) if anchor else db.utcnow())
     db.snapshot(conn)
     print(evaluation.format_report(evaluation.engine_report(conn)))
     print("Saved as the new demo starting state (what Reset restores).")

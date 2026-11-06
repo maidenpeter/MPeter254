@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
 from typing import Any, Iterable
@@ -48,15 +49,24 @@ OFFICIAL_CHANNELS = "Only pay through {airline}'s official channels."
 # Wording that appears on scam paperwork and never on a real air waybill: fees
 # demanded by an "agent" before goods are released or loaded.
 _SCAM_RE = re.compile(
-    # "pay ... to the agent", "send the fee via our agent"
-    r"\b(pay|payment|paid|remit|send|deposit)\b[^.\n]{0,60}\b(to|via|through)\s+(the\s+|our\s+|an?\s+|your\s+)?agent"
-    # "release on payment of", "cleared upon payment"
-    r"|\b(release|released|clearing|clearance|cleared)\s+(on|upon|after|against)\s+payment"
+    # "pay ... to the agent", "send the fee via our clearing agent"
+    r"\b(pay|payment|paid|remit|send|deposit|settle|settled)\b[^.\n]{0,60}\b(to|via|through)\s+"
+    r"(the\s+|our\s+|an?\s+|your\s+)?(\w+\s+)?agent"
+    r"|\bpayable\s+to\b"
+    # "release on payment of", "cleared upon full payment"
+    r"|\b(release|released|clearing|clearance|cleared)\s+(on|upon|after|against)\s+(full\s+)?payment"
     # "pay the storage charges ... to avoid auction / before release / before loading"
     r"|\bpay(ment)?\b[^.\n]{0,50}\b(fee|fees|charge|charges)\b[^.\n]{0,40}\b(before|to avoid|or)\b[^.\n]{0,20}"
     r"\b(release|loading|auction|seizure|forfeit)"
+    # fee names with a demand next to them: "clearance charges must be paid", "pay the release fee"
+    r"|\b(release|clearance|clearing|demurrage|forwarding)\s+(fee|fees|charges?)\b[^.\n]{0,60}"
+    r"\b(pay|paid|payable|remit|send|due|required|settle)\b"
+    r"|\b(pay|payable|remit|send|due|required|settle)\b[^.\n]{0,40}\b(release|clearance|clearing|demurrage)\s+(fee|fees|charges?)\b"
     r"|\bbalance\s+of\s+(usd|kes|\$)[^.\n]{0,40}\bdue\b"
-    r"|\bto\s+avoid\s+(auction|seizure|forfeiture)",
+    r"|\bto\s+avoid\s+(auction|seizure|forfeiture)"
+    # payment channels an airline never prints on an air waybill
+    r"|\bm-?pesa\b|\bpaybill\b|\btill\s+(no|number)\b|\blipa\s+na\b|\bwestern\s+union\b|\bmoneygram\b"
+    r"|\bkindly\s+(remit|pay|send|deposit)\b",
     re.IGNORECASE,
 )
 
@@ -264,6 +274,8 @@ def check_policy_token(conn: sqlite3.Connection, token: str) -> VerifyResult:
 
 def verify_policy(conn: sqlite3.Connection, token: str, channel: str = "api", input_type: str = "qr") -> VerifyResult:
     res = check_policy_token(conn, token)
+    if not (20 <= len((token or "").strip()) <= 64):
+        input_type = "text"  # not shaped like an issued token: someone typing, not a scanned document
     _log(conn, channel, input_type, res.input_value, res.result)
     return res
 
@@ -285,12 +297,20 @@ def check_policy_number(conn: sqlite3.Connection, pid: int, awb_on_document: str
                             f"Cover {shown} does not belong to air waybill {awbmod.fmt(awb_on_document)}. Someone may "
                             "have copied a genuine policy number onto another document. Do not pay on the strength of it.",
                             shown)
-    return _policy_result(conn, p, shown)
+    res = _policy_result(conn, p, shown)
+    if res.result == GENUINE:
+        # Policy numbers are sequential, so they never unlock the amount covered.
+        d = res.details
+        res.details = {k: d[k] for k in ("policy_no", "status", "awb", "flight_date", "cover_ends") if k in d}
+        res.message = (f"Cover {d['policy_no']} is real and active for air waybill {d['awb']}, flight date "
+                       f"{nice_date(d['flight_date'])}. To see the amount covered, scan the QR code on the certificate.")
+    return res
 
 
 # ------------------------------------------------------------------ images
 
 _AIRPORT_RE = re.compile(r"\b([A-Z]{3})\b")
+_DOMAIN_RE = re.compile(r"(?i)\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b")  # a bare web address in a QR code
 _CERT_RE = re.compile(r"certificate", re.IGNORECASE)
 _COVER_RE = re.compile(r"\b(cover|insurance|policy)\b", re.IGNORECASE)
 
@@ -329,7 +349,20 @@ def _is_certificate(text: str) -> bool:
     return bool(_CERT_RE.search(text) and _COVER_RE.search(text))
 
 
+_IMAGE_SLOTS = threading.BoundedSemaphore(2)  # OCR is heavy: two photos at a time
+
+
 def check_image(conn: sqlite3.Connection, data: bytes, trusted_hosts: Iterable[str] | None = None) -> VerifyResult:
+    if not _IMAGE_SLOTS.acquire(timeout=20):
+        return VerifyResult(UNREADABLE, "unknown", "Busy checking other photos. Please send it again in a moment, "
+                            "or type the air waybill number.")
+    try:
+        return _check_image(conn, data, trusted_hosts)
+    finally:
+        _IMAGE_SLOTS.release()
+
+
+def _check_image(conn: sqlite3.Connection, data: bytes, trusted_hosts: Iterable[str] | None = None) -> VerifyResult:
     trusted = _trusted(trusted_hosts)
     try:
         img = ocr.load_image(data)
@@ -349,8 +382,9 @@ def check_image(conn: sqlite3.Connection, data: bytes, trusted_hosts: Iterable[s
                 qr_token = link.value
             else:
                 qr_numbers += awbmod.find_in_text(link.value)
-        elif "://" in payload or payload.lower().startswith("www."):
-            return _foreign_link(urlparse(payload).hostname if "://" in payload else payload[:40])
+        elif "://" in payload or payload.lower().startswith("www.") or _DOMAIN_RE.search(payload):
+            m = _DOMAIN_RE.search(payload)
+            return _foreign_link(urlparse(payload).hostname if "://" in payload else (m.group(0) if m else payload[:40]))
         else:
             qr_numbers += awbmod.find_in_text(payload)
 
@@ -402,10 +436,12 @@ def check_image(conn: sqlite3.Connection, data: bytes, trusted_hosts: Iterable[s
                             f"The QR code ({awbmod.fmt(qr_numbers[0])}) and the printed air waybill number don't "
                             "match. " + DO_NOT_PAY.format(airline=_airline()), awbmod.fmt(qr_numbers[0]))
 
-    # Two different, well-formed AWB numbers on one page (allowing a one-digit OCR
-    # slip) means someone pasted a real number onto another document.
+    # Two different, well-formed AWB numbers of ours on one page (allowing a one-digit
+    # OCR slip) means someone pasted a real number onto another document. Other
+    # prefixes are left out: an 11-digit phone number can look like an AWB.
+    ours = [n for n in valid if n[:3] == config.awb_prefix()]
     distinct = []
-    for n in valid:
+    for n in ours:
         if not any(n == m or sum(a != b for a, b in zip(n, m)) <= 1 for m in distinct):
             distinct.append(n)
     if len(distinct) > 1:
@@ -415,15 +451,21 @@ def check_image(conn: sqlite3.Connection, data: bytes, trusted_hosts: Iterable[s
                             + DO_NOT_PAY.format(airline=_airline()), awbmod.fmt(distinct[0]))
 
     found = [n for n in valid if _lookup_awb(conn, n) is not None]
-    number = found[0] if found else valid[0]
+    number = found[0] if found else (ours[0] if ours else valid[0])
 
     if awbmod.validate(number).prefix != config.awb_prefix():
         # Another airline's number. A paper that still claims to be ours, or asks for
         # a fee, is a fake; otherwise send the person to that airline.
-        if re.search(re.escape(_airline()), text, re.IGNORECASE) or _SCAM_RE.search(text):
-            return VerifyResult(SUSPICIOUS, "policy" if is_certificate else "awb",
+        kind = "policy" if is_certificate else "awb"
+        if re.search(re.escape(_airline()), text, re.IGNORECASE):
+            return VerifyResult(SUSPICIOUS, kind,
                                 f"This document names {_airline()} but its number, {awbmod.fmt(number)}, belongs to "
                                 "another airline. " + DO_NOT_PAY.format(airline=_airline()), awbmod.fmt(number))
+        if _SCAM_RE.search(text):
+            return VerifyResult(SUSPICIOUS, kind,
+                                f"This is another airline's air waybill ({awbmod.fmt(number)}), and it asks for money to "
+                                "be paid to someone before the goods move. Airlines don't collect fees that way. Check "
+                                "with the airline that issued it before paying anything.", awbmod.fmt(number))
         res = check_awb(conn, number, from_document=True)
         res.kind = "policy" if is_certificate else "awb"
         if is_certificate:
@@ -432,18 +474,21 @@ def check_image(conn: sqlite3.Connection, data: bytes, trusted_hosts: Iterable[s
         return res
 
     if is_certificate:
-        if _SCAM_RE.search(text):
-            return _fee_demand(number, "certificate")
         if not found:
             return VerifyResult(NOT_FOUND, "policy",
                                 f"This certificate quotes air waybill {awbmod.fmt(number)}, but {_airline()} has no "
                                 "such booking, so the certificate cannot be genuine. Do not pay on the strength of it.",
                                 awbmod.fmt(number))
+        if _SCAM_RE.search(text):
+            return _fee_demand(number, "certificate")
         pid = policies.parse_policy_no(text)
         if pid is not None:
             return check_policy_number(conn, pid, number)
-        row = _lookup_awb(conn, number)
-        return _policy_result(conn, policies.for_booking(conn, row["id"]), awbmod.fmt(number))
+        # No QR and no policy number to go on: never confirm (or reveal) cover from an AWB alone.
+        return VerifyResult(UNREADABLE, "policy",
+                            f"Air waybill {awbmod.fmt(number)} is real, but I can only confirm the cover itself from "
+                            "the QR code on the certificate, or from its policy number sent with the air waybill "
+                            "number.", awbmod.fmt(number))
 
     res = check_awb(conn, number, from_document=True)
     if res.result == GENUINE:
@@ -455,9 +500,10 @@ def check_image(conn: sqlite3.Connection, data: bytes, trusted_hosts: Iterable[s
                                 f"Air waybill {awbmod.fmt(number)} is real, but the airports on this document don't "
                                 f"match the booking ({row['origin']} to {row['destination']}). The paperwork may have "
                                 "been altered. " + DO_NOT_PAY.format(airline=_airline()), awbmod.fmt(number))
-        res.message = (f"The number is real. This confirms the air waybill, route and flight only, not the rest "
-                       f"of the paper: check it shows {_pieces(row['pieces'])} and {_weight(row['weight_kg'])}. "
-                       + res.message)
+        res.message = (f"The number is real. Now check the paper against our record: {row['origin']} to "
+                       f"{row['destination']}, flight date {nice_date(row['flight_date'])}, {_pieces(row['pieces'])}, "
+                       f"{_weight(row['weight_kg'])}. If anything differs, the paper has been altered: do not pay. "
+                       + OFFICIAL_CHANNELS.format(airline=_airline()))
     return res
 
 

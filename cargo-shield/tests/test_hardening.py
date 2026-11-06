@@ -245,7 +245,7 @@ def test_staff_pages_are_closed_to_other_devices(seeded):
 
     from cargoshield.app import app
 
-    with TestClient(app, client=("192.168.1.20", 50000)) as phone:
+    with TestClient(app, base_url="http://localhost", client=("192.168.1.20", 50000)) as phone:
         assert phone.get("/api/stats").status_code == 403
         assert phone.post("/api/admin/reset").status_code == 403
         assert phone.get("/api/policies/1/qr.png").status_code == 403
@@ -260,7 +260,7 @@ def test_staff_pages_are_closed_to_other_devices(seeded):
 def test_cross_site_posts_are_refused(client):
     r = client.post("/api/admin/reset", headers={"origin": "http://evil.example"})
     assert r.status_code == 403
-    assert client.post("/api/admin/reset", headers={"origin": "http://testserver"}).status_code == 200
+    assert client.post("/api/admin/reset", headers={"origin": "http://localhost"}).status_code == 200
 
 
 def test_booking_api_refuses_fake_and_foreign_awbs(client, conn):

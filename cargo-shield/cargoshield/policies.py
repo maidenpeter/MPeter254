@@ -132,6 +132,10 @@ def referral_reasons(conn: sqlite3.Connection, b: Any, flagged: set[int] | None 
     fired = {h["id"] for h in json.loads(hits["rule_hits_json"])} if hits else set()
     if fired & set(c.get("refer_if_rules") or []):
         out.append("the risk reasons on this booking need a person to look at them")
+    cap = c.get("maximum_sum_insured_usd")
+    liability = float(b["weight_kg"]) * float(c["carrier_liability_sdr_per_kg"]) * float(c["sdr_to_usd"])
+    if cap and float(b["declared_value_usd"]) - liability > float(cap):
+        out.append(f"the sum insured is above the USD {float(cap):,.0f} online limit")
     return out
 
 
@@ -155,8 +159,8 @@ def quote_booking(conn: sqlite3.Connection, booking_id: int, as_of: datetime | N
         # Cover has to be bought before the risk starts (no insuring a known outcome).
         q.eligible = False
         q.bindable = False
-        q.reason = (f"This flight left on {departure:%d %b %Y}. Cover has to be bought before departure, "
-                    "so it is no longer offered.")
+        q.reason = (f"This flight left on {date.fromisoformat(b['flight_date']):%d %b %Y}. Cover has to be bought "
+                    "before departure, so it is no longer offered.")
     if q.eligible:
         q.referral_reasons = referral_reasons(conn, b, flagged)
         q.bindable = not q.referral_reasons

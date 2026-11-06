@@ -70,7 +70,7 @@ needs_qr = pytest.mark.skipif(not ocr.qr_available(), reason="zxing-cpp not inst
 ])
 def test_every_fake_document_is_caught(conn, spec):
     data = (config.fakes_dir() / spec.filename).read_bytes()
-    res = verify.verify_image(conn, data, channel="test", trusted_hosts={"localhost", "testserver"})
+    res = verify.verify_image(conn, data, channel="test", trusted_hosts={"localhost"})
     assert res.result == spec.expected, res.message
 
 

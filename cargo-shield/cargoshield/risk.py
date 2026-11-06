@@ -236,13 +236,13 @@ def score_all(conn: sqlite3.Connection, model: AnomalyModel) -> dict[str, Any]:
     # so rescoring after a rules.yaml change gives the same answer every time.
     flagged = set(graph.flagged_shippers(conn, include_scores=False))
     cleared = graph.approved_bookings(conn)  # a person reviewed these and let them fly
-    high_own: dict[int, set[int]] = {}
+    high_own: dict[int, dict[int, str]] = {}
     for r, f, an in zip(rows, base_feats, anomalies):
         if r["id"] in cleared:
             continue
         if combine(evaluate(rules, f, skip=graph_ids), an).score >= high_min:
             flagged.add(r["shipper_id"])
-            high_own.setdefault(r["shipper_id"], set()).add(r["id"])
+            high_own.setdefault(r["shipper_id"], {})[r["id"]] = r["booked_at"]
     rejected = _rejected_by_shipper(conn)
 
     # Pass 2: add what the network and the shipper's other bookings say.
@@ -251,7 +251,7 @@ def score_all(conn: sqlite3.Connection, model: AnomalyModel) -> dict[str, Any]:
     counts = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
     for r, an in zip(rows, anomalies):
         linked = idx.linked_flagged(r["shipper_id"], flagged)
-        other = _other_flag(r["id"], high_own.get(r["shipper_id"], set()), rejected.get(r["shipper_id"], set()))
+        other = _other_flag(r["id"], r["booked_at"], high_own.get(r["shipper_id"], {}), rejected.get(r["shipper_id"], {}))
         f = booking_features(r, _shipper_of(r), model.route_freq, linked, other)
         res = combine(evaluate(rules, f), an)
         _write(conn, r["id"], res, when)
@@ -269,8 +269,8 @@ def screen_booking(conn: sqlite3.Connection, booking_id: int, model: AnomalyMode
         raise KeyError(booking_id)
     flagged = set(graph.flagged_shippers(conn))
     linked = graph.LinkIndex(conn).linked_flagged(row["shipper_id"], flagged)
-    other = _other_flag(booking_id, _high_own_from_scores(conn, row["shipper_id"]),
-                        _rejected_by_shipper(conn).get(row["shipper_id"], set()))
+    other = _other_flag(booking_id, row["booked_at"], _high_own_from_scores(conn, row["shipper_id"]),
+                        _rejected_by_shipper(conn).get(row["shipper_id"], {}))
     f = booking_features(row, _shipper_of(row), model.route_freq, linked, other)
     an = model.score([f])[0]
     res = combine(evaluate(rules, f), an)
@@ -281,36 +281,51 @@ def screen_booking(conn: sqlite3.Connection, booking_id: int, model: AnomalyMode
     return res
 
 
-def _rejected_by_shipper(conn: sqlite3.Connection) -> dict[int, set[int]]:
-    out: dict[int, set[int]] = {}
+def _rejected_by_shipper(conn: sqlite3.Connection) -> dict[int, dict[int, str]]:
+    """shipper -> {refused booking id: when it was refused}."""
+    out: dict[int, dict[int, str]] = {}
     for r in conn.execute(
-        "SELECT b.shipper_id, b.id FROM review_decision d JOIN booking b ON b.id = d.booking_id WHERE d.decision = 'reject'"
+        "SELECT b.shipper_id, b.id, d.decided_at FROM review_decision d JOIN booking b ON b.id = d.booking_id "
+        "WHERE d.decision = 'reject'"
     ):
-        out.setdefault(r["shipper_id"], set()).add(r["id"])
+        out.setdefault(r["shipper_id"], {})[r["id"]] = r["decided_at"]
     return out
 
 
-def _high_own_from_scores(conn: sqlite3.Connection, shipper_id: int, cleared: set[int] | None = None) -> set[int]:
+def _booked_at(conn: sqlite3.Connection, ids: set[int]) -> dict[int, str]:
+    if not ids:
+        return {}
+    return {r[0]: r[1] for r in conn.execute(
+        f"SELECT id, booked_at FROM booking WHERE id IN ({','.join('?' for _ in ids)})", sorted(ids))}
+
+
+def _high_own_from_scores(conn: sqlite3.Connection, shipper_id: int, cleared: set[int] | None = None) -> dict[int, str]:
     """The shipper's bookings that score HIGH on their own evidence (stored scores),
     leaving out any a reviewer approved."""
     rcfg = config.rules_config()
     graph_ids = set(rcfg.get("graph_rules") or [])
     cap = int(rcfg["anomaly"]["max_score_without_rule_hit"])
     high_min = int(rcfg["bands"]["HIGH"][0])
-    out = set()
+    out: dict[int, str] = {}
     cleared = graph.approved_bookings(conn) if cleared is None else cleared
     for r in conn.execute(
-        "SELECT b.id, r.rule_hits_json FROM booking b JOIN risk_score r ON r.booking_id = b.id WHERE b.shipper_id = ?",
+        "SELECT b.id, b.booked_at, r.rule_hits_json FROM booking b JOIN risk_score r ON r.booking_id = b.id "
+        "WHERE b.shipper_id = ?",
         (shipper_id,),
     ):
         if r["id"] not in cleared and graph.base_score(json.loads(r["rule_hits_json"]), graph_ids, cap) >= high_min:
-            out.add(r["id"])
+            out[r["id"]] = r["booked_at"]
     return out
 
 
-def _other_flag(booking_id: int, high_own: set[int], rejected: set[int]) -> dict[str, bool]:
-    """What the shipper's *other* bookings say (never this booking itself)."""
-    return {"rejected": bool(rejected - {booking_id}), "high": bool(high_own - {booking_id})}
+def _other_flag(booking_id: int, booked_at: str, high_own: dict[int, str], rejected: dict[int, str]) -> dict[str, bool]:
+    """What the shipper's *other* bookings said when this one was booked: refusals
+    decided before it, and HIGH bookings made before it. Never this booking itself,
+    and never hindsight (a past booking isn't rescored with what came later)."""
+    return {
+        "rejected": any(bid != booking_id and when <= booked_at for bid, when in rejected.items()),
+        "high": any(bid != booking_id and when <= booked_at for bid, when in high_own.items()),
+    }
 
 
 def rescore_bookings(conn: sqlite3.Connection, booking_ids: Sequence[int], model: AnomalyModel) -> int:
@@ -324,13 +339,13 @@ def rescore_bookings(conn: sqlite3.Connection, booking_ids: Sequence[int], model
     rejected = _rejected_by_shipper(conn)
     cleared = graph.approved_bookings(conn)
     rows = conn.execute(_BOOKING_SQL + f" WHERE b.id IN ({','.join('?' for _ in ids)})", ids).fetchall()
-    high_cache: dict[int, set[int]] = {}
+    high_cache: dict[int, dict[int, str]] = {}
     feats = []
     for row in rows:
         sid = row["shipper_id"]
         if sid not in high_cache:
             high_cache[sid] = _high_own_from_scores(conn, sid, cleared)
-        other = _other_flag(row["id"], high_cache[sid], rejected.get(sid, set()))
+        other = _other_flag(row["id"], row["booked_at"], high_cache[sid], rejected.get(sid, {}))
         feats.append(booking_features(row, _shipper_of(row), model.route_freq, idx.linked_flagged(sid, flagged), other))
     when = db.iso(db.utcnow())
     for row, f, an in zip(rows, feats, model.score(feats)):

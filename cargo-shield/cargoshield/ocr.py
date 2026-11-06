@@ -20,7 +20,16 @@ os.environ.setdefault("OMP_THREAD_LIMIT", "1")
 OCR_TIMEOUT_S = 12  # total budget for one photo: give up and ask for the number rather than freeze the chat
 
 Image.MAX_IMAGE_PIXELS = 40_000_000
-MAX_PIXELS = 25_000_000  # a 50-megapixel phone photo is far more than OCR needs
+MAX_PIXELS = 20_000_000  # a 12 MP phone photo is plenty for OCR
+# Photos only. Pillow can also open formats like EPS, which hands the file to
+# Ghostscript; nothing a person sends from a phone needs that.
+PHOTO_FORMATS = ["JPEG", "PNG", "WEBP", "GIF", "BMP"]
+try:
+    from PIL import EpsImagePlugin
+
+    EpsImagePlugin.gs_binary = False
+except Exception:  # older Pillow
+    pass
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 
 
@@ -55,7 +64,7 @@ def load_image(data: bytes) -> Image.Image:
     if len(data) > MAX_UPLOAD_BYTES:
         raise BadImage("image is larger than 8 MB")
     try:
-        img = Image.open(io.BytesIO(data))  # reads the header only
+        img = Image.open(io.BytesIO(data), formats=PHOTO_FORMATS)  # reads the header only
         if img.width * img.height > MAX_PIXELS or max(img.size) > 10_000:
             raise BadImage(f"image is {img.width}x{img.height} pixels; please send a smaller photo")
         if min(img.size) < 40 or max(img.size) / max(min(img.size), 1) > 8:
@@ -63,7 +72,7 @@ def load_image(data: bytes) -> Image.Image:
         img.load()
     except BadImage:
         raise
-    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as e:
+    except (UnidentifiedImageError, OSError, ValueError, KeyError, Image.DecompressionBombError) as e:
         raise BadImage(f"not a readable image ({e.__class__.__name__})") from e
     img = ImageOps.exif_transpose(img)  # phone photos carry their rotation in EXIF
     return img.convert("RGB")

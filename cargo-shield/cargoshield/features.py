@@ -13,6 +13,11 @@ from . import commodity
 from .db import parse_dt
 
 
+def _hours_text(h: float) -> str:
+    t = math.floor(h * 10) / 10
+    return f"{t:.0f}" if t == int(t) else f"{t:.1f}"
+
+
 def _age_text(days: float) -> str:
     if days < 1:
         return "less than a day"
@@ -86,6 +91,8 @@ def booking_features(
         "payment_phrase": commodity.payment_phrase(booking["payment_method"]),
         # timing
         "lead_time_hours": float(booking["lead_time_hours"]),
+        # one decimal, truncated: 11.96 h reads "11.9", never "12" under a 12-hour rule
+        "lead_time_text": _hours_text(float(booking["lead_time_hours"])),
         # shipper
         "shipper_age_days": shipper_age_days,
         "shipper_age_text": _age_text(shipper_age_days),

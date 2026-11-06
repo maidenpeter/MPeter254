@@ -82,7 +82,7 @@ rules:
       all:
         - {field: lead_time_hours, op: lt, value: 12}
         - {field: payment_method, op: in, value: [cash, third_party]}
-    reason: "Booked {lead_time_hours:.0f} hours before departure and paid {payment_phrase}."
+    reason: "Booked {lead_time_text} hours before departure and paid {payment_phrase}."
 
   - id: linked_to_flagged_shipper
     weight: 45
@@ -142,7 +142,7 @@ rules:
       all:
         - {field: lead_time_hours, op: lt, value: 6}
         - {field: payment_method, op: not_in, value: [cash, third_party]}
-    reason: "Booked only {lead_time_hours:.0f} hours before departure."
+    reason: "Booked only {lead_time_text} hours before departure."
 
   - id: cash_payment
     weight: 8

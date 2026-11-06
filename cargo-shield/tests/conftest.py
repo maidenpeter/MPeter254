@@ -56,5 +56,5 @@ def client(seeded):
     from cargoshield.app import app
 
     db.restore()  # every API test starts from the demo start state
-    with TestClient(app) as c:
+    with TestClient(app, base_url="http://localhost") as c:
         yield c

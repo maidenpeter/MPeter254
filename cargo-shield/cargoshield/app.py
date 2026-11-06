@@ -67,14 +67,24 @@ async def guard(request: Request, call_next):
     if not request.url.path.startswith(PUBLIC_PREFIXES) and not local:
         return JSONResponse({"detail": "Staff pages are only available on the presenter's laptop."}, status_code=403)
     if request.method not in ("GET", "HEAD", "OPTIONS"):
+        try:
+            size = int(request.headers.get("content-length") or 0)
+        except ValueError:
+            size = 0
+        if size > ocr.MAX_UPLOAD_BYTES + 1_000_000:
+            return JSONResponse({"detail": "Upload too large (8 MB at most)."}, status_code=413)
         origin = request.headers.get("origin")
         if origin and urlparse(origin).netloc != request.headers.get("host"):
             return JSONResponse({"detail": "Cross-site request refused."}, status_code=403)
     return await call_next(request)
 
 
+def _data_label() -> str:
+    return str(config.settings()["airline"].get("data_label") or "")
+
+
 def _allowed_hosts(server: str) -> set[str]:
-    hosts = {"localhost", "127.0.0.1", "::1", "testserver"}
+    hosts = {"localhost", "127.0.0.1", "::1"}
     if server:
         hosts.add(server.lower())
     configured = str(config.settings()["server"].get("public_base_url") or "auto")
@@ -187,7 +197,7 @@ def api_demo(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     report.pop("missed_awbs", None)
     return {
         "airline": config.airline_name(),
-        "data_label": config.settings()["airline"].get("data_label", ""),
+        "data_label": _data_label(),
         "seeded_at": db.get_meta(conn, "seeded_at"),
         "hero_high_booking_id": meta.get("hero_high_booking_id"),
         "hero_high_awb": awbmod.fmt(meta.get("hero_high_awb", "")),
@@ -366,7 +376,12 @@ def api_new_booking(body: NewBooking, request: Request, conn: sqlite3.Connection
     graph.add_links_for_booking(conn, body.shipper_id, body.payment_ref)
     conn.commit()
     res = risk.screen_booking(conn, bid, model)
-    if res.band == "HIGH":
+    shared_payer = body.payment_ref and conn.execute(
+        "SELECT COUNT(DISTINCT a_value) FROM contact_link WHERE a_type = 'shipper' AND b_type = 'payment_ref' "
+        "AND b_value = ?", (body.payment_ref,)).fetchone()[0] > 1
+    if res.band == "HIGH" or shared_payer:
+        # A new HIGH booking flags the shipper; a payer account shared with someone
+        # else is a new link in the graph. Either way the neighbours' scores move.
         risk.rescore_after_flag(conn, body.shipper_id, model, skip_booking=bid)
     return _booking_detail(conn, bid, request)
 
@@ -536,7 +551,7 @@ td{{padding:6px 0}} footer{{color:#667085;font-size:12px;margin-top:20px}}
 <div class="brand">CargoShield</div><div class="sub">Verification for {airline}</div>
 <div class="card"><span class="result">{html.escape(res.result)}</span>
 <p>{html.escape(res.message)}</p><table>{rows}</table></div>
-<footer>{html.escape(config.settings()["airline"].get("data_label", ""))} Synthetic records only.</footer>
+<footer>{html.escape(_data_label())} Synthetic records only.</footer>
 </main></body></html>"""
     return HTMLResponse(body)
 

@@ -27,15 +27,13 @@ Point at the top strip: bookings screened, sent to review, policies, premium, fa
 2. Click the highlighted document. It goes into the chat as a photo.
 3. In a couple of seconds: **NOT FOUND**. "Demo Airline has no booking with air waybill 999-47182030. Do not pay anyone, release goods or hand over money on the strength of this document."
 
-The drawer header shows when the flight leaves, with a countdown.
-
 Say: "A buyer in Lagos gets this on WhatsApp and is asked to pay a clearing fee. One photo, one answer, before the money moves. The Fakes caught counter just went up by one."
 
 Optional: click the fake with the look-alike QR code. It comes back SUSPICIOUS because the QR points to a site that isn't ours.
 
 ### Step 2: a HIGH booking and the ring behind it (60 seconds)
 
-1. Demo path, step **2**. Booking **999-60422180** opens: 6 kg of gold bars, about $752,000 declared (6 kg at the gold price in `config/commodities.yaml`), score **100, HIGH**, on a Nairobi flight that hasn't left yet.
+1. Demo path, step **2**. The drawer header shows when the flight leaves, with a countdown. Booking **999-60422180** opens: 6 kg of gold bars, about $752,000 declared (6 kg at the gold price in `config/commodities.yaml`), score **100, HIGH**, on a Nairobi flight that hasn't left yet.
 2. Read the reasons, top to bottom:
    - New shipper, 12 days old, booking high-value goods
    - Shares a phone number with a flagged shipper
