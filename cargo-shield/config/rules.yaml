@@ -112,7 +112,7 @@ rules:
       all:
         - {field: shipper_other_high, op: eq, value: true}
         - {field: shipper_previously_rejected, op: eq, value: false}
-    reason: "This shipper has another booking that scored HIGH and is waiting for a reviewer."
+    reason: "This shipper has another booking that scored HIGH."
 
   - id: value_density_outlier
     weight: 20

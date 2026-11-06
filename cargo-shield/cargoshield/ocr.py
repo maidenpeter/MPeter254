@@ -60,9 +60,11 @@ def qr_available() -> bool:
 
 def load_image(data: bytes) -> Image.Image:
     if not data:
-        raise BadImage("empty file")
+        raise BadImage("the file is empty")
+    if data[4:8] == b"ftyp" and data[8:12] in (b"heic", b"heix", b"hevc", b"mif1", b"msf1", b"avif"):
+        raise BadImage("iPhone HEIC/AVIF photos aren't supported here; send it as a JPEG or a screenshot")
     if len(data) > MAX_UPLOAD_BYTES:
-        raise BadImage("image is larger than 8 MB")
+        raise BadImage("it is larger than 8 MB")
     try:
         img = Image.open(io.BytesIO(data), formats=PHOTO_FORMATS)  # reads the header only
         if img.width * img.height > MAX_PIXELS or max(img.size) > 10_000:
@@ -73,7 +75,7 @@ def load_image(data: bytes) -> Image.Image:
     except BadImage:
         raise
     except (UnidentifiedImageError, OSError, ValueError, KeyError, Image.DecompressionBombError) as e:
-        raise BadImage(f"not a readable image ({e.__class__.__name__})") from e
+        raise BadImage("it isn't a photo I can read") from e
     img = ImageOps.exif_transpose(img)  # phone photos carry their rotation in EXIF
     return img.convert("RGB")
 

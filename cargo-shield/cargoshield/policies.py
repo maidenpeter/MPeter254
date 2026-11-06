@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from decimal import Decimal
 import secrets
 import sqlite3
 from datetime import date, datetime, timedelta
@@ -117,7 +118,8 @@ def cover_ends(flight_date: str) -> date:
     return date.fromisoformat(flight_date[:10]) + timedelta(days=days)
 
 
-def referral_reasons(conn: sqlite3.Connection, b: Any, flagged: set[int] | None = None) -> list[str]:
+def referral_reasons(conn: sqlite3.Connection, b: Any, flagged: set[int] | None = None,
+                     sum_insured: float | None = None) -> list[str]:
     """Why cover for this booking needs an underwriter rather than a click."""
     c = config.settings()["cover"]
     out = []
@@ -133,8 +135,7 @@ def referral_reasons(conn: sqlite3.Connection, b: Any, flagged: set[int] | None 
     if fired & set(c.get("refer_if_rules") or []):
         out.append("the risk reasons on this booking need a person to look at them")
     cap = c.get("maximum_sum_insured_usd")
-    liability = float(b["weight_kg"]) * float(c["carrier_liability_sdr_per_kg"]) * float(c["sdr_to_usd"])
-    if cap and float(b["declared_value_usd"]) - liability > float(cap):
+    if cap and sum_insured is not None and Decimal(str(sum_insured)) > Decimal(str(cap)):
         out.append(f"the sum insured is above the USD {float(cap):,.0f} online limit")
     return out
 
@@ -162,7 +163,7 @@ def quote_booking(conn: sqlite3.Connection, booking_id: int, as_of: datetime | N
         q.reason = (f"This flight left on {date.fromisoformat(b['flight_date']):%d %b %Y}. Cover has to be bought "
                     "before departure, so it is no longer offered.")
     if q.eligible:
-        q.referral_reasons = referral_reasons(conn, b, flagged)
+        q.referral_reasons = referral_reasons(conn, b, flagged, q.sum_insured_usd)
         q.bindable = not q.referral_reasons
     return q
 

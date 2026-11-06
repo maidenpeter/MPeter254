@@ -5,7 +5,7 @@
 0. Before a real pitch, refresh `data/routes.csv` from the airline's public schedule page and set `awb_prefix` (999 is Air China's real prefix). Until you do, set `data_label: "Demo data built on a placeholder schedule."` in `config/settings.yaml` and say "placeholder schedule" rather than "the public schedule".
 1. On the day, run `make demo`. It reseeds, so the HIGH booking sits on a Nairobi flight that leaves 4 to 11 hours later, whatever time you run it. Run it again if you present later than that.
 2. Open http://localhost:8000 in a full-screen browser window.
-3. Run `make doctor` once. If Tesseract is missing, step 1 still works: the chat will ask for the number, and you type `999-47182030`.
+3. Run `make doctor` once. If Tesseract is missing, step 1 still works: the chat will ask for the number, and you type `999-47182030`. (Typed numbers don't count as fakes caught, so skip the line about the counter.)
 4. Rehearsing? Hit **Reset** (top right) or run `make reset` between runs. It puts everything back exactly as it was after `make demo`.
 5. Want to scan the QR with a real phone? Start with `make demo HOST=0.0.0.0`, open the dashboard on the LAN address it prints, and keep the phone on the same Wi-Fi. The phone can open the verification page and nothing else; the dashboard only answers your laptop. Otherwise use the on-screen "Scan the QR" button, which opens exactly what a phone camera would.
 
@@ -45,7 +45,7 @@ Optional: click the fake with the look-alike QR code. It comes back SUSPICIOUS b
 
 Say: "Each sentence is a rule your team can read and tune. The model only adds weight; it never flags anyone on its own. And this booking isn't rejected. It's waiting for a person in the review queue, before the plane leaves." (Point at the Review queue tab count.)
 
-If asked what the public sees: verify this AWB in the chat. It says the AWB is genuine and booked, nothing about review. The flag stays internal.
+If asked what the public sees: verify this AWB in the chat. It confirms the AWB is genuine with route, date, pieces and weight, and says nothing about review. The flag stays internal.
 
 ### Step 3: a clean booking, cover, and the QR (60 seconds)
 

@@ -18,7 +18,7 @@ reference_prices:
 classes:
   valuables:
     label: Valuables
-    keywords: [gold, precious metal, bank note, banknote, cash, gemstone, jewel*, bullion, dore]
+    keywords: [gold, precious metal, bank note, banknote, cash in transit, currency, gemstone, jewellery, jewelry, bullion, dore]
     descriptions: [Gold bars, Gold dore, Precious metals, Gemstones]
     # Only planted (suspicious) shipments carry cash; established traders don't.
     descriptions_planted_extra: [Bank notes]

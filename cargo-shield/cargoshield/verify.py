@@ -52,7 +52,7 @@ _SCAM_RE = re.compile(
     # "pay ... to the agent", "send the fee via our clearing agent"
     r"\b(pay|payment|paid|remit|send|deposit|settle|settled)\b[^.\n]{0,60}\b(to|via|through)\s+"
     r"(the\s+|our\s+|an?\s+|your\s+)?(\w+\s+)?agent"
-    r"|\bpayable\s+to\b"
+    r"|\bpayable\s+to\b(?!\s+(the\s+)?order\s+of)"
     # "release on payment of", "cleared upon full payment"
     r"|\b(release|released|clearing|clearance|cleared)\s+(on|upon|after|against)\s+(full\s+)?payment"
     # "pay the storage charges ... to avoid auction / before release / before loading"
@@ -60,7 +60,7 @@ _SCAM_RE = re.compile(
     r"\b(release|loading|auction|seizure|forfeit)"
     # fee names with a demand next to them: "clearance charges must be paid", "pay the release fee"
     r"|\b(release|clearance|clearing|demurrage|forwarding)\s+(fee|fees|charges?)\b[^.\n]{0,60}"
-    r"\b(pay|paid|payable|remit|send|due|required|settle)\b"
+    r"(\b(pay|remit|send|settle)\b|\b(payable|due)\s+(to|before|immediately|now)\b|\brequired\s+before\b)"
     r"|\b(pay|payable|remit|send|due|required|settle)\b[^.\n]{0,40}\b(release|clearance|clearing|demurrage)\s+(fee|fees|charges?)\b"
     r"|\bbalance\s+of\s+(usd|kes|\$)[^.\n]{0,40}\bdue\b"
     r"|\bto\s+avoid\s+(auction|seizure|forfeiture)"
@@ -195,13 +195,16 @@ def check_awb(conn: sqlite3.Connection, text: str, from_document: bool = False) 
                                 f"The number on this document, {shown}, fails the airline check-digit test, "
                                 f"so {airline} could never have issued it. Treat the document as forged. "
                                 + DO_NOT_PAY.format(airline=airline), shown)
+        # Typed by a person: it may be a phone number, so the log keeps no digits.
         return VerifyResult(INVALID, "awb",
                             f"{shown} fails the air waybill check-digit test. Check the number for typing "
-                            "mistakes. If you copied it from a document, treat that document as suspicious.", shown)
+                            "mistakes. If you copied it from a document, treat that document as suspicious.",
+                            "11 digits, check digit fails")
     if c.prefix != config.awb_prefix():
         return VerifyResult(OTHER_AIRLINE, "awb",
                             f"{shown} is not a {airline} air waybill (its prefix {c.prefix} belongs to another "
-                            "airline). Check it with the airline that issued it.", shown)
+                            "airline). Check it with the airline that issued it.",
+                            shown if from_document else f"other airline, prefix {c.prefix}")
     row = _lookup_awb(conn, c.awb)
     if row is None:
         return VerifyResult(NOT_FOUND, "awb",
@@ -344,9 +347,29 @@ def _ocr_slip(number: str, expected: str) -> bool:
 
 
 def _is_certificate(text: str) -> bool:
-    # An air waybill can mention insurance ("Amount of insurance: NIL"); only a page
-    # that calls itself a certificate of cover/insurance is treated as one.
-    return bool(_CERT_RE.search(text) and _COVER_RE.search(text))
+    """Is this page about insurance cover (certificate, cover note, policy schedule)?
+
+    An air waybill can mention insurance ("Amount of insurance: NIL"), so that word
+    alone isn't enough; a policy number or a sum insured is."""
+    if _CERT_RE.search(text) and _COVER_RE.search(text):
+        return True
+    return bool(_SUM_INSURED_RE.search(text) or policies.parse_policy_no(text) is not None
+                or re.search(r"\b(cover\s+note|policy\s+schedule|schedule\s+of\s+insurance)\b", text, re.IGNORECASE))
+
+
+_SUM_INSURED_RE = re.compile(r"sum\s+insured[^0-9\n]{0,12}([0-9][0-9,]*(?:\.[0-9]{2})?)", re.IGNORECASE)
+
+
+def _printed_amount_differs(text: str, actual: float) -> bool:
+    """True if the page prints a sum insured that isn't the real one (OCR slips aside)."""
+    m = _SUM_INSURED_RE.search(text or "")
+    if not m:
+        return False
+    try:
+        printed = float(m.group(1).replace(",", ""))
+    except ValueError:
+        return False
+    return abs(printed - actual) > max(1.0, 0.01 * actual)
 
 
 _IMAGE_SLOTS = threading.BoundedSemaphore(2)  # OCR is heavy: two photos at a time
@@ -483,7 +506,15 @@ def _check_image(conn: sqlite3.Connection, data: bytes, trusted_hosts: Iterable[
             return _fee_demand(number, "certificate")
         pid = policies.parse_policy_no(text)
         if pid is not None:
-            return check_policy_number(conn, pid, number)
+            res = check_policy_number(conn, pid, number)
+            p = policies.get(conn, pid) if res.result == GENUINE else None
+            if p is not None and _printed_amount_differs(text, p["sum_insured_usd"]):
+                # Says only that the paper is wrong, not what the real amount is.
+                return VerifyResult(SUSPICIOUS, "policy",
+                                    f"Cover {policies.policy_no(pid)} is real, but the sum insured printed on this "
+                                    "certificate doesn't match it. The certificate has been altered. Scan the QR code "
+                                    "on the original, and do not pay on the strength of this one.", res.input_value)
+            return res
         # No QR and no policy number to go on: never confirm (or reveal) cover from an AWB alone.
         return VerifyResult(UNREADABLE, "policy",
                             f"Air waybill {awbmod.fmt(number)} is real, but I can only confirm the cover itself from "

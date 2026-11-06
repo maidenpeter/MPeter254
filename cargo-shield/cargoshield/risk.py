@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Mapping, Sequence
 
 from . import config, db, graph
@@ -246,12 +246,13 @@ def score_all(conn: sqlite3.Connection, model: AnomalyModel) -> dict[str, Any]:
     rejected = _rejected_by_shipper(conn)
 
     # Pass 2: add what the network and the shipper's other bookings say.
+    now = db.utcnow()
     idx = graph.LinkIndex(conn)
     when = db.iso(db.utcnow())
     counts = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
     for r, an in zip(rows, anomalies):
         linked = idx.linked_flagged(r["shipper_id"], flagged)
-        other = _other_flag(r["id"], r["booked_at"], high_own.get(r["shipper_id"], {}), rejected.get(r["shipper_id"], {}))
+        other = _other_flag(r["id"], _cutoff(r, now), high_own.get(r["shipper_id"], {}), rejected.get(r["shipper_id"], {}))
         f = booking_features(r, _shipper_of(r), model.route_freq, linked, other)
         res = combine(evaluate(rules, f), an)
         _write(conn, r["id"], res, when)
@@ -269,7 +270,7 @@ def screen_booking(conn: sqlite3.Connection, booking_id: int, model: AnomalyMode
         raise KeyError(booking_id)
     flagged = set(graph.flagged_shippers(conn))
     linked = graph.LinkIndex(conn).linked_flagged(row["shipper_id"], flagged)
-    other = _other_flag(booking_id, row["booked_at"], _high_own_from_scores(conn, row["shipper_id"]),
+    other = _other_flag(booking_id, _cutoff(row, db.utcnow()), _high_own_from_scores(conn, row["shipper_id"]),
                         _rejected_by_shipper(conn).get(row["shipper_id"], {}))
     f = booking_features(row, _shipper_of(row), model.route_freq, linked, other)
     an = model.score([f])[0]
@@ -318,13 +319,22 @@ def _high_own_from_scores(conn: sqlite3.Connection, shipper_id: int, cleared: se
     return out
 
 
-def _other_flag(booking_id: int, booked_at: str, high_own: dict[int, str], rejected: dict[int, str]) -> dict[str, bool]:
-    """What the shipper's *other* bookings said when this one was booked: refusals
-    decided before it, and HIGH bookings made before it. Never this booking itself,
-    and never hindsight (a past booking isn't rescored with what came later)."""
+def _cutoff(row: Mapping[str, Any], now: datetime) -> str:
+    """How far into the shipper's history a booking may look.
+
+    A flight still to go is judged on everything known now (a refusal today should
+    stop tomorrow's shipment). A flight that has left is judged on what was known
+    when it was booked, so history isn't rewritten with hindsight."""
+    departure = db.parse_dt(row["booked_at"]) + timedelta(hours=row["lead_time_hours"])
+    return db.iso(now) if departure > now else row["booked_at"]
+
+
+def _other_flag(booking_id: int, cutoff: str, high_own: dict[int, str], rejected: dict[int, str]) -> dict[str, bool]:
+    """What the shipper's *other* bookings say, up to `cutoff` (see _cutoff).
+    Never this booking itself."""
     return {
-        "rejected": any(bid != booking_id and when <= booked_at for bid, when in rejected.items()),
-        "high": any(bid != booking_id and when <= booked_at for bid, when in high_own.items()),
+        "rejected": any(bid != booking_id and when <= cutoff for bid, when in rejected.items()),
+        "high": any(bid != booking_id and when <= cutoff for bid, when in high_own.items()),
     }
 
 
@@ -339,13 +349,14 @@ def rescore_bookings(conn: sqlite3.Connection, booking_ids: Sequence[int], model
     rejected = _rejected_by_shipper(conn)
     cleared = graph.approved_bookings(conn)
     rows = conn.execute(_BOOKING_SQL + f" WHERE b.id IN ({','.join('?' for _ in ids)})", ids).fetchall()
+    now = db.utcnow()
     high_cache: dict[int, dict[int, str]] = {}
     feats = []
     for row in rows:
         sid = row["shipper_id"]
         if sid not in high_cache:
             high_cache[sid] = _high_own_from_scores(conn, sid, cleared)
-        other = _other_flag(row["id"], row["booked_at"], high_cache[sid], rejected.get(sid, {}))
+        other = _other_flag(row["id"], _cutoff(row, now), high_cache[sid], rejected.get(sid, {}))
         feats.append(booking_features(row, _shipper_of(row), model.route_freq, idx.linked_flagged(sid, flagged), other))
     when = db.iso(db.utcnow())
     for row, f, an in zip(rows, feats, model.score(feats)):

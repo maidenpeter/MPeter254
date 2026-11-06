@@ -93,6 +93,48 @@ def _allowed_hosts(server: str) -> set[str]:
     return hosts
 
 
+class _BodyLimit:
+    """Count the request body as it arrives and stop at the upload limit.
+
+    A Content-Length check alone is skipped by chunked uploads, which would let
+    a public endpoint spool any amount of data to disk."""
+
+    def __init__(self, app, limit: int):
+        self.app, self.limit = app, limit
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("method") in ("GET", "HEAD", "OPTIONS"):
+            return await self.app(scope, receive, send)
+        total = 0
+        too_big = False
+
+        async def counted():
+            nonlocal total, too_big
+            message = await receive()
+            if message["type"] == "http.request":
+                total += len(message.get("body", b""))
+                if total > self.limit:
+                    too_big = True  # stop reading here; whatever the app answers becomes a 413
+                    raise HTTPException(413, "Upload too large (8 MB at most).")
+            return message
+
+        async def replying(message):
+            if too_big and message["type"] == "http.response.start":
+                body = b'{"detail":"Upload too large (8 MB at most)."}'
+                await send({"type": "http.response.start", "status": 413,
+                            "headers": [(b"content-type", b"application/json"),
+                                        (b"content-length", str(len(body)).encode())]})
+                await send({"type": "http.response.body", "body": body})
+                return
+            if too_big and message["type"] == "http.response.body":
+                return  # the replacement body has already gone
+            await send(message)
+
+        await self.app(scope, counted, replying)
+
+
+app.add_middleware(_BodyLimit, limit=ocr.MAX_UPLOAD_BYTES + 1_000_000)
+
 _watched: dict[str, float] = {}
 
 

@@ -72,6 +72,11 @@ function setKpi(id, value, prev) {
 
 async function loadStats() {
   const s = await api("/api/stats");
+  if (state.stats && s.seeded_at !== state.stats.seeded_at) {
+    // `make demo` ran again: booking ids and documents changed under this tab.
+    state.demo = null; state.docs = null;
+    loadBookings();
+  }
   const p = state.stats;
   setKpi("#k-screened", num(s.screened), p && p.screened);
   setKpi("#k-flagged", num(s.flagged_high), p && p.flagged_high);
@@ -244,7 +249,7 @@ function renderDetail(d) {
         <div><span>Declared value</span><b>${usd(b.declared_value_usd)}</b></div>
         <div><span>Payment</span><b>${esc(b.payment_label)}</b> ${b.payment_ref ? `<span>${esc(b.payment_ref)}</span>` : ""}</div>
         <div><span>Booked</span><b>${stamp(b.booked_at)}</b></div>
-        <div><span>Lead time</span><b>${num(b.lead_time_hours, 0)} h before departure</b></div>
+        <div><span>Lead time</span><b>${num(Math.floor(b.lead_time_hours * 10) / 10, b.lead_time_hours % 1 ? 1 : 0)} h before departure</b></div>
       </div>
     </div>
 
@@ -518,7 +523,8 @@ async function ensureDemo() {
 }
 
 async function runStep(step) {
-  const demo = await ensureDemo();
+  const demo = state.demo = await api("/api/demo");  // always fresh: a reseed changes the ids
+  $("#path-high").textContent = demo.hero_high_awb; $("#path-clean").textContent = demo.hero_clean_awb;
   $("#path-panel").classList.add("compact");
   if (step === "1") {
     closeDrawer();

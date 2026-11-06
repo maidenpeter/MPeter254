@@ -30,4 +30,5 @@ def kpis(conn: sqlite3.Connection) -> dict[str, Any]:
         "fakes_caught": one(f"SELECT COUNT(*) FROM verification_log WHERE result IN ({placeholders}) "
                             f"AND input_type IN ({doc_inputs})", *FAKE_RESULTS, *DOCUMENT_INPUTS),
         "checks_total": one("SELECT COUNT(*) FROM verification_log"),
+        "seeded_at": (conn.execute("SELECT value FROM demo_meta WHERE key = 'seeded_at'").fetchone() or [None])[0],
     }

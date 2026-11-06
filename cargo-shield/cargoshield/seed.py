@@ -441,10 +441,11 @@ class Generator:
             **phys,
             "payment_method": payment,
             "payment_ref": payment_ref,
-            # Round the lead time, then move the booking time to match, so booked_at +
-            # lead_time is exactly the scheduled departure.
-            "booked_at": db.iso(dep - timedelta(hours=round((dep - booked).total_seconds() / 3600.0, 1))),
-            "lead_time_hours": round((dep - booked).total_seconds() / 3600.0, 1),
+            # Round the lead time up to a tenth of an hour, then move the booking time to
+            # match: booked_at + lead_time is exactly the scheduled departure, and the
+            # booking only ever moves earlier, never into the future.
+            "booked_at": db.iso(dep - timedelta(hours=math.ceil((dep - booked).total_seconds() / 360.0) / 10)),
+            "lead_time_hours": math.ceil((dep - booked).total_seconds() / 360.0) / 10,
             "status": "new",
             "_patterns": [],
         }

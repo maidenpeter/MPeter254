@@ -30,12 +30,21 @@ def _keyword_re(keyword: str) -> re.Pattern[str]:
     return re.compile(r"\b" + re.escape(k) + r"(?:s|es)?\b")
 
 
+# Words that make a high-value keyword describe something cheap: phone cases,
+# jewellery boxes, cash registers, gold-coloured paint.
+_ACCESSORY_RE = re.compile(r"\b(case|cases|cover|covers|box|boxes|register|registers|charger|chargers|holder|holders|"
+                           r"stand|stands|accessor(y|ies)|display|displays|packaging|paint|coloured|colored|plated|"
+                           r"leaf|foil|imitation|costume|toy|toys)\b")
+
+
 def classify(text: str) -> str:
     """Pick a class from the description. Vague text falls through to general cargo."""
     t = (text or "").lower()
     if is_vague(t):
         return config.commodities()["vague"]["class"]
     for name, spec in classes().items():
+        if spec.get("high_value") and _ACCESSORY_RE.search(t):
+            continue
         if any(_keyword_re(k).search(t) for k in spec.get("keywords") or []):
             return name
     return "general_cargo"
