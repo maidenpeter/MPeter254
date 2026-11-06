@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from cargoshield import db
+from cargoshield import config, db
 
 
 def test_index_and_static_assets(client):
@@ -36,7 +36,7 @@ def test_booking_list_filters(client):
     assert high["items"] and all(b["band"] == "HIGH" for b in high["items"])
     flagged = client.get("/api/bookings?band=FLAGGED&limit=1").json()
     assert flagged["total"] > high["total"]
-    hit = client.get("/api/bookings?q=999-60422180").json()
+    hit = client.get(f"/api/bookings?q={config.awb_prefix()}-60422180").json()
     assert hit["total"] == 1
 
 

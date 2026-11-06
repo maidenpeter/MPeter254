@@ -1,6 +1,6 @@
 """Chat handling behind one function, plus the (unconnected) WhatsApp adapter."""
 
-from cargoshield import awb, db, fakes, messaging, policies, verify, whatsapp
+from cargoshield import awb, config, db, fakes, messaging, policies, verify, whatsapp
 
 M = messaging.IncomingMessage
 
@@ -17,7 +17,7 @@ def test_awb_in_free_text(conn):
 
 
 def test_fake_number_warns_not_to_pay(conn):
-    number = awb.fmt(awb.make("999", fakes.FAKES[0].serial7))
+    number = awb.fmt(awb.make(config.awb_prefix(), fakes.FAKES[0].serial7))
     out = messaging.handle_message(conn, M("whatsapp-sim", "u", text=number))
     assert out.result == verify.NOT_FOUND and "do not pay" in out.text.lower()
 
@@ -38,7 +38,7 @@ def test_unrecognised_text(conn):
 def test_whatsapp_adapter_round_trip(conn):
     payload = {"object": "whatsapp_business_account", "entry": [{"changes": [{"field": "messages", "value": {
         "messages": [
-            {"from": "254000000000", "id": "m1", "type": "text", "text": {"body": "999-12345675"}},
+            {"from": "254000000000", "id": "m1", "type": "text", "text": {"body": awb.example(config.awb_prefix())}},
             {"from": "254000000000", "id": "m2", "type": "image", "image": {"id": "MEDIA1", "mime_type": "image/jpeg"}},
         ]}}]}]}
     msgs = whatsapp.parse_webhook(payload)
@@ -46,3 +46,9 @@ def test_whatsapp_adapter_round_trip(conn):
     reply = messaging.handle_message(conn, msgs[0][0])
     body = whatsapp.build_text_reply("254000000000", reply)
     assert body["messaging_product"] == "whatsapp" and body["text"]["body"] == reply.text
+
+
+def test_help_text_example_follows_the_configured_prefix():
+    example = awb.example(config.awb_prefix())
+    assert example in messaging.help_text()
+    assert awb.validate(example).ok and example.startswith(config.awb_prefix() + "-")

@@ -122,7 +122,7 @@ def test_genuine_certificate_with_a_fee_demand_is_suspicious(conn):
 @needs_ocr
 def test_two_air_waybill_numbers_on_one_page_is_suspicious(conn):
     b = _hero_clean(conn)
-    other = awb.fmt(awb.make("999", "2718281"))
+    other = awb.fmt(awb.make(config.awb_prefix(), "2718281"))
     img = documents.draw_awb(other, "Shipper", "Nairobi", "Consignee", "Lusaka", b["origin"], b["destination"],
                              "09 NOV 2026", b["pieces"], b["weight_kg"], b["commodity_text"], b["declared_value_usd"],
                              scam_note=f"Ref {awb.fmt(b['awb'])}")
@@ -152,7 +152,7 @@ def test_long_thin_images_are_refused(conn):
 
 def test_unknown_host_header_is_refused(client):
     assert client.get("/api/stats", headers={"host": "attacker.example"}).status_code == 400
-    assert client.get("/verify/awb/999-12345675", headers={"host": "attacker.example"}).status_code == 400
+    assert client.get(f"/verify/awb/{awb.example(config.awb_prefix())}", headers={"host": "attacker.example"}).status_code == 400
     assert client.get("/api/stats", headers={"host": "localhost:8000"}).status_code == 200
 
 

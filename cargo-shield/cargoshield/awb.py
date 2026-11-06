@@ -39,6 +39,11 @@ def make_invalid(prefix: str, serial7: str) -> str:
     return f"{prefix}{serial7}{bad}"
 
 
+def example(prefix: str) -> str:
+    """A well-formed sample number for help text, e.g. 999-12345675."""
+    return fmt(make(prefix, "1234567"))
+
+
 def fmt(awb11: str) -> str:
     """999-12345675 is the usual printed form."""
     return f"{awb11[:3]}-{awb11[3:]}" if len(awb11) == 11 else awb11

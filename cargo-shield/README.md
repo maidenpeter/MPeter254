@@ -14,12 +14,12 @@ Everything. There is no connection to any airline system.
 
 | Thing | How it is made |
 |---|---|
-| Airline | "Demo Airline", AWB prefix `999`, as the brief asked. **Heads-up: 999 is Air China's real cargo prefix**, and cargo people know their prefixes. Change `awb_prefix` in `config/settings.yaml` (to the airline's own prefix once you have permission) before showing anyone in the industry. |
+| Airline | "Demo Airline", AWB prefix `999`, as the brief asked. **Heads-up: 999 is Air China's real cargo prefix**, and cargo people know their prefixes. Change `awb_prefix` in `config/settings.yaml` (to the airline's own prefix once you have permission) before showing anyone in the industry. Astral Aviation's prefix is `485` (IATA designator 8V, ICAO ACP, per IATA's clearing-house and SIS participant lists). Switching is that one line plus the AWB numbers quoted in `DEMO.md`; the tests pass with either prefix. |
 | Routes | `data/routes.csv`: Nairobi, Johannesburg and Hong Kong hubs plus African destinations. Days and times are placeholders. **Refresh this file from the airline's public schedule page before any real pitch.** Departure times are local to the origin airport; time zones come from a table in `cargoshield/seed.py`, or add a `timezone` column (e.g. `Africa/Nairobi`) for airports it doesn't know. |
 | Shippers (~400) | Invented company names. Emails use the reserved `.example` domain. Phone numbers start `88` after the country code, a block that Google's libphonenumber data lists as unassigned in every demo country, so they should not reach a real phone (a test checks this with the `phonenumbers` package). Any resemblance to a real business is chance. |
 | Bookings (3,000) | Generated with fixed random seeds, so the demo's AWB numbers, shippers and amounts are the same every time; counts, routes and dates follow the day you seed. About 4% carry a planted risk pattern with a known answer, used to test the engine. |
 | Fraud ring | Five planted shippers sharing a phone, an email and a payer account. |
-| Gold and specie | Gold is priced from `reference_prices.gold_usd_per_oz` in `config/commodities.yaml` (USD 3,900, roughly spot on 1 Nov 2026). Check spot before a demo; the HIGH demo booking is 6 kg of gold bars at that price. |
+| Gold and specie | Gold is priced from `reference_prices.gold_usd_per_oz` in `config/commodities.yaml` (USD 4,100; CNBC had spot at USD 4,126 on 5 Nov 2026). Gold moves several percent a week, so check spot before a demo; the HIGH demo booking is 6 kg of gold bars at that price. |
 | Fake documents | 8 images in `data/fakes/`, drawn with Pillow by the seed and dated around the day you seed. Each uses an AWB number that fails the check digit or does not exist. Scam *patterns* only (clearing-fee notes, release stamps, look-alike QR sites). Nothing copied from real forgeries, scam reports or court cases. |
 | Insurance prices | Illustrative. Not real rates and not an offer of insurance. The UI says so. |
 
@@ -146,7 +146,7 @@ cargo-shield/
 ## Data protection notes
 
 - Kenya's Data Protection Act, 2019 applies as soon as real shipper data is used.
-- The ODPC's Guidance Note on Cross-border Data Transfers (consulted on in April and May 2026, final version published in September 2026) treats processing personal data in a cloud environment with servers outside Kenya as a cross-border transfer. Backups abroad count too. A real pilot should host in Kenya, or document the legal basis, risk assessment and safeguards for each transfer. Read the guidance note itself before relying on this summary.
+- The ODPC's guidance on cross-border data transfers (a draft was consulted on from 15 April to 15 May 2026; law-firm summaries date the published notes to 8 September 2026) treats processing personal data in a cloud environment with servers outside Kenya as a cross-border transfer. Giving someone outside Kenya access to the data counts too. A real pilot should host in Kenya, or document the legal basis, risk assessment and safeguards for each transfer. Read the guidance note itself before relying on this summary.
 - Verification responses never expose shipper personal data. The dashboard masks phone numbers, emails and payer references even for staff.
 - Flags are internal. Nothing in the system publicly labels anyone a fraudster, and no booking is rejected without a person deciding.
 

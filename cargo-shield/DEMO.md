@@ -2,7 +2,7 @@
 
 ## Before you walk in
 
-0. Before a real pitch, refresh `data/routes.csv` from the airline's public schedule page and set `awb_prefix` (999 is Air China's real prefix). Until you do, set `data_label: "Demo data built on a placeholder schedule."` in `config/settings.yaml` and say "placeholder schedule" rather than "the public schedule".
+0. Check gold spot and set `gold_usd_per_oz` in `config/commodities.yaml`; `make demo` in step 1 reseeds, so the gold booking picks it up. Before a real pitch, also refresh `data/routes.csv` from the airline's public schedule page and set `awb_prefix` (999 is Air China's real prefix; Astral Aviation's is 485, so use that only with Astral's permission). Until you do, set `data_label: "Demo data built on a placeholder schedule."` in `config/settings.yaml` and say "placeholder schedule" rather than "the public schedule".
 1. On the day, run `make demo`. It reseeds, so the HIGH booking sits on a Nairobi flight that leaves 4 to 11 hours later, whatever time you run it. Run it again if you present later than that.
 2. Open http://localhost:8000 in a full-screen browser window.
 3. Run `make doctor` once. If Tesseract is missing, step 1 still works: the chat will ask for the number, and you type `999-47182030`. (Typed numbers don't count as fakes caught, so skip the line about the counter.)
@@ -33,7 +33,7 @@ Optional: click the fake with the look-alike QR code. It comes back SUSPICIOUS b
 
 ### Step 2: a HIGH booking and the ring behind it (60 seconds)
 
-1. Demo path, step **2**. The drawer header shows when the flight leaves, with a countdown. Booking **999-60422180** opens: 6 kg of gold bars, about $752,000 declared (6 kg at the gold price in `config/commodities.yaml`), score **100, HIGH**, on a Nairobi flight that hasn't left yet.
+1. Demo path, step **2**. The drawer header shows when the flight leaves, with a countdown. Booking **999-60422180** opens: 6 kg of gold bars, about $791,000 declared (6 kg at the gold price in `config/commodities.yaml`), score **100, HIGH**, on a Nairobi flight that hasn't left yet.
 2. Read the reasons, top to bottom:
    - New shipper, 12 days old, booking high-value goods
    - Shares a phone number with a flagged shipper

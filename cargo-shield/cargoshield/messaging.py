@@ -56,7 +56,7 @@ def help_text() -> str:
     airline = config.airline_name()
     return (f"Hello. This is CargoShield for {airline}.\n"
             "Send me any of these and I'll tell you if it's real:\n"
-            "• an air waybill number, like 999-12345675\n"
+            f"• an air waybill number, like {awbmod.example(config.awb_prefix())}\n"
             "• a photo of the air waybill or insurance certificate\n"
             "• the link from the QR code on a CargoShield certificate")
 

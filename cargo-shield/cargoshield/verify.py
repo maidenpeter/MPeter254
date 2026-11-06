@@ -187,7 +187,7 @@ def check_awb(conn: sqlite3.Connection, text: str, from_document: bool = False) 
     if c.status == "bad_format":
         return VerifyResult(INVALID, "awb",
                             "That doesn't look like an air waybill number. It should be 3 digits, a dash, "
-                            "then 8 digits, for example 999-12345675.", _masked_input(text))
+                            f"then 8 digits, for example {awbmod.example(config.awb_prefix())}.", _masked_input(text))
     shown = awbmod.fmt(c.awb)
     if c.status == "bad_check_digit":
         if from_document:
@@ -438,13 +438,13 @@ def _check_image(conn: sqlite3.Connection, data: bytes, trusted_hosts: Iterable[
     if text is None and not qr_numbers:
         return VerifyResult(UNREADABLE, "unknown",
                             "Photo reading isn't switched on here. Please type the air waybill number, "
-                            "for example 999-12345675.")
+                            f"for example {awbmod.example(config.awb_prefix())}.")
     text = text or ""
     numbers = list(dict.fromkeys(qr_numbers + printed))
     if not numbers:
         return VerifyResult(UNREADABLE, "unknown",
                             "I couldn't find an air waybill number in that photo. Please type the number, "
-                            "for example 999-12345675.")
+                            f"for example {awbmod.example(config.awb_prefix())}.")
 
     is_certificate = _is_certificate(text)
     checks = [(n, awbmod.validate(n)) for n in numbers]

@@ -1,6 +1,6 @@
 # CargoShield demo settings.
-# Everything here is demo configuration. Nothing in this file is a real rate,
-# a real airline code or a real customer.
+# Everything here is demo configuration. The rates are illustrative and there
+# are no real customers. The one real code is awb_prefix: see the note below.
 
 airline:
   name: Demo Airline
@@ -11,6 +11,7 @@ airline:
   # 3-digit airline prefix for air waybills. The brief asked for 999, but 999 is
   # Air China's real cargo prefix, so change it before showing anyone in the
   # industry: to the airline's own prefix once it has given permission.
+  # Astral Aviation's prefix is 485 (IATA 8V, ICAO ACP).
   awb_prefix: "999"
 
 paths:
@@ -46,7 +47,8 @@ cover:
   # 26 SDR per kg since 28 December 2024 (was 22).
   # Verify the current Montreal Convention limit before any real use.
   carrier_liability_sdr_per_kg: 26
-  # Illustrative SDR to USD rate. Check the IMF daily rate before any real use.
+  # SDR to USD rate. The IMF had 1.356360 for 5 November 2026; it moves daily,
+  # so check the IMF rate before any real use.
   sdr_to_usd: 1.36
   # Loadings are shares of the gross premium:
   #   gross = expected_loss / (1 - expense_loading - profit_margin)

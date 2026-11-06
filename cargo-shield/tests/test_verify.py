@@ -35,10 +35,10 @@ def test_flags_stay_internal(conn):
 
 def test_not_found_and_invalid_format(conn):
     serial = fakes.FAKES[0].serial7
-    assert verify.check_awb(conn, awb.make("999", serial)).result == verify.NOT_FOUND
-    assert verify.check_awb(conn, "999-1234").result == verify.INVALID
-    assert verify.check_awb(conn, "999-12345676").result == verify.INVALID  # bad check digit, typed
-    assert verify.check_awb(conn, "999-12345676", from_document=True).result == verify.SUSPICIOUS
+    assert verify.check_awb(conn, awb.make(config.awb_prefix(), serial)).result == verify.NOT_FOUND
+    assert verify.check_awb(conn, f"{config.awb_prefix()}-1234").result == verify.INVALID
+    assert verify.check_awb(conn, f"{config.awb_prefix()}-12345676").result == verify.INVALID  # bad check digit, typed
+    assert verify.check_awb(conn, f"{config.awb_prefix()}-12345676", from_document=True).result == verify.SUSPICIOUS
     other_airline = awb.make("176", "1234567")
     assert verify.check_awb(conn, other_airline).result == verify.OTHER_AIRLINE
 

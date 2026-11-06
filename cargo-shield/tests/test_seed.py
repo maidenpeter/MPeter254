@@ -91,6 +91,6 @@ def test_fake_documents_exist_and_cannot_match_a_booking(conn):
 
 def test_demo_heroes_are_recorded(conn):
     meta = db.get_meta(conn, "demo")
-    assert awb.fmt(meta["hero_high_awb"]) == "999-60422180"
-    assert awb.fmt(meta["hero_clean_awb"]) == "999-31509461"
+    assert awb.fmt(meta["hero_high_awb"]) == f"{config.awb_prefix()}-60422180"
+    assert awb.fmt(meta["hero_clean_awb"]) == f"{config.awb_prefix()}-31509461"
     assert len(meta["ring_shipper_ids"]) == 5

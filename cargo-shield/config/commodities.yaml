@@ -12,8 +12,9 @@
 
 # Reference prices the generator uses. Illustrative: check spot before a demo.
 reference_prices:
-  # Gold was about USD 3,900 per troy ounce on 1 November 2026 (pricegold.net).
-  gold_usd_per_oz: 3900
+  # Gold spot was USD 4,126 per troy ounce at 9 a.m. ET on 5 November 2026 (CNBC),
+  # up from about 3,870 on 30 October. It moves several percent a week.
+  gold_usd_per_oz: 4100
 
 classes:
   valuables:
@@ -31,7 +32,7 @@ classes:
       Bank notes: {usd_per_kg: [40000, 100000]}
     density_kg_m3: [1200, 6500]
     typical_density: 3000
-    value_per_kg: [20000, 130000]
+    value_per_kg: [20000, 140000]
     weight_kg: [1, 40]
     piece_kg: 5
     high_value: true
